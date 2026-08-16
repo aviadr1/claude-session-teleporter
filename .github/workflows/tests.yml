@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows is where this tool actually runs; linux and macos are here to
+        # keep the pure logic honest and portable
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.12", "3.13"]
+        exclude:
+          - os: macos-latest
+            python: "3.10"
+          - os: macos-latest
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pytest
+      - run: python -m pytest -q
+      # the drift tests skip on a bare runner: there is no real session store to
+      # check the reverse-engineered formats against. Prove they are skipping
+      # rather than silently passing empty.
+      - name: drift tests skip cleanly without a store
+        run: python -m pytest -q -m drift -rs
