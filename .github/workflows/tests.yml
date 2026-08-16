@@ -25,13 +25,54 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python }}
-      - run: pip install pytest
-      - run: python -m pytest -q
+          enable-cache: true
+      - name: Run the suite
+        run: uv run --frozen --python ${{ matrix.python }} pytest -q
       # the drift tests skip on a bare runner: there is no real session store to
       # check the reverse-engineered formats against. Prove they are skipping
       # rather than silently passing empty.
-      - name: drift tests skip cleanly without a store
-        run: python -m pytest -q -m drift -rs
+      - name: Drift tests skip cleanly without a store
+        run: uv run --frozen --python ${{ matrix.python }} pytest -q -m drift -rs
+
+  # The install story is `curl the file and run it`. That has to keep working on
+  # an interpreter with nothing installed - no uv, no venv, no package.
+  bare-interpreter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Run the tool with no dependencies available
+        run: |
+          cp claude_sessions.py "$RUNNER_TEMP/"
+          cd "$RUNNER_TEMP"
+          python claude_sessions.py --version
+          python claude_sessions.py guide > /dev/null
+          python claude_sessions.py --help > /dev/null
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: The wheel must declare no runtime dependencies
+        run: |
+          uv run --no-project --with 'packaging' python - <<'PY'
+          import glob, re, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          z = zipfile.ZipFile(whl)
+          meta = z.read(next(n for n in z.namelist() if n.endswith("METADATA"))).decode()
+          deps = re.findall(r"^Requires-Dist:.*", meta, re.M)
+          assert not deps, f"wheel declares runtime dependencies: {deps}"
+          files = [n for n in z.namelist() if not n.endswith("/") and ".dist-info/" not in n]
+          assert files == ["claude_sessions.py"], f"wheel is not a single module: {files}"
+          print("ok:", whl, "- one module, no dependencies")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dists
+          path: dist/
