@@ -30,6 +30,11 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
+          # the default key uses the runner's ambient python, which is the same
+          # for every entry in a matrix that selects its python via `uv run
+          # --python`. Without this the matrix jobs race to save one shared
+          # cache, and all but one lose.
+          cache-suffix: py${{ matrix.python }}
       - name: Run the suite
         run: uv run --frozen --python ${{ matrix.python }} pytest -q
       # the drift tests skip on a bare runner: there is no real session store to
