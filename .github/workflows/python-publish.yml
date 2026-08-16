@@ -17,17 +17,21 @@ jobs:
   release-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # pinned exactly: setup-uv stopped publishing floating major tags after
+      # v7, so @v10 does not resolve
+      - uses: astral-sh/setup-uv@v10.0.1
 
+      # P3 already pins pyproject against __version__ (test_version_matches_the
+      # _module), so this only has to tie the release tag to one of them. No toml
+      # parser, so it runs on any interpreter uv picks.
       - name: The release tag must match the version we are about to publish
         run: |
-          uv run --frozen python - <<'PY'
-          import os, re, tomllib
+          uv run --no-project python - <<'PY'
+          import os, re
           tag = os.environ["TAG"].lstrip("v")
-          proj = tomllib.loads(open("pyproject.toml", "rb").read().decode())["project"]["version"]
-          mod = re.search(r'^__version__ = "([^"]+)"', open("claude_sessions.py", encoding="utf-8").read(), re.M)[1]
-          assert tag == proj == mod, f"version mismatch: tag={tag} pyproject={proj} __version__={mod}"
+          proj = re.search(r'^version = "([^"]+)"', open("pyproject.toml", encoding="utf-8").read(), re.M)[1]
+          assert tag == proj, f"release tag {tag!r} does not match pyproject version {proj!r}"
           print(f"ok: publishing {proj}")
           PY
         env:
@@ -39,7 +43,7 @@ jobs:
       - name: Build release distributions
         run: uv build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-dists
           path: dist/
@@ -53,7 +57,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/claude-session-teleporter
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: release-dists
           path: dist/

@@ -24,8 +24,10 @@ jobs:
             python: "3.13"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # pinned exactly: setup-uv stopped publishing floating major tags after
+      # v7, so @v10 does not resolve
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
       - name: Run the suite
@@ -41,8 +43,8 @@ jobs:
   bare-interpreter:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
       - name: Run the tool with no dependencies available
@@ -56,12 +58,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
       - run: uv build
+      # stdlib only, and deliberately so: a job that asserts "no dependencies"
+      # should not need one to say it
       - name: The wheel must declare no runtime dependencies
         run: |
-          uv run --no-project --with 'packaging' python - <<'PY'
+          uv run --no-project python - <<'PY'
           import glob, re, zipfile
           whl = glob.glob("dist/*.whl")[0]
           z = zipfile.ZipFile(whl)
@@ -72,7 +76,7 @@ jobs:
           assert files == ["claude_sessions.py"], f"wheel is not a single module: {files}"
           print("ok:", whl, "- one module, no dependencies")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dists
           path: dist/
