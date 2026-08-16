@@ -3,13 +3,23 @@
 > **Oh, you _can_ take it with you.**
 > Out of quota, not out of context.
 
-Teleport Claude Code desktop sessions between account/org partitions.
+Teleport Claude Code sessions between account/org partitions, and between WSL
+and the Windows desktop app.
 
 If you use Claude Code under more than one organization — a work org and a
 personal Max plan, say — the desktop app shows you **only the partition you are
 currently signed into**. Sessions from your other org are still on disk, they
 are simply invisible. This tool finds them, and copies them into the partition
 you are signed into so you can carry on.
+
+Sessions you started by running `claude` inside WSL are invisible for a
+different reason: they have **no desktop metadata at all**, so no org you sign
+into will ever show them. That is a separate axis, with a separate fix.
+
+| axis | what differs | command |
+|---|---|---|
+| **partition** | account/org — same machine, same transcripts | `copy` |
+| **host** | WSL vs Windows — different filesystem, different install | `adopt` / `eject` |
 
 ```
 $ claude_sessions.py partitions
@@ -34,7 +44,7 @@ syncs between machines.
 | Transcript | `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl` |
 | Deletion tombstone | `.../<orgUuid>/deleted_<id>` |
 
-Two consequences drive this whole tool:
+Three consequences drive this whole tool:
 
 1. **Metadata is partitioned by account *and* org; transcripts are not.** Two
    orgs under the same login get separate metadata folders but share one
@@ -43,7 +53,12 @@ Two consequences drive this whole tool:
 
 2. **The app caches its session index in memory.** Files written while it is
    running are not noticed; there is no filesystem watcher and no reload hook.
-   Restart Claude after copying.
+   Make it re-read disk afterwards — **switching accounts in the app is enough,
+   and is faster than restarting it.** Restarting works too.
+
+3. **WSL is a third place entirely.** A distro has its own `~/.claude` with its
+   own transcripts and *no* metadata directory, so sessions started there are
+   invisible to the app in every org. See [WSL](#wsl).
 
 ## The part that makes a naive `cp` wrong
 
@@ -101,7 +116,7 @@ claude_sessions.py partitions
 # name one so you stop reading UUIDs
 claude_sessions.py label 3c426532 work
 
-# unarchived sessions (flags: A=archived  !=transcript missing  R=ssh/remote)
+# unarchived sessions (flags: A=archived  !=transcript missing  R=ssh/remote  W=WSL)
 claude_sessions.py sessions -p work
 claude_sessions.py sessions -p work --all
 
@@ -118,6 +133,43 @@ claude_sessions.py copy --from work -s 5651c527 --apply
 `copy` prints a direction diagram, the per-session plan, and the port fixes it
 would apply, then stops. Nothing is written without `--apply`.
 
+### WSL
+
+```bash
+# this machine, plus every WSL distro with a Claude Code install
+claude_sessions.py hosts
+
+# what is in there. ORIGIN separates two things that share a directory:
+#   cli      you ran `claude` at a terminal inside the distro
+#   desktop  the Windows app started it, using the distro as its environment
+claude_sessions.py sessions -H wsl:Ubuntu
+claude_sessions.py sessions -H wsl:Ubuntu --cli -n 10
+
+# make WSL CLI sessions visible in the app (dry run, then for real)
+claude_sessions.py adopt --from wsl:Ubuntu
+claude_sessions.py adopt --from wsl:Ubuntu -s 3f8137a7 --apply
+
+# the other direction: hand a Windows session to the CLI inside WSL
+claude_sessions.py eject 8aef0655 --to wsl:Ubuntu --apply
+```
+
+`adopt` writes **only metadata**. The transcript stays inside the distro and is
+never copied or rewritten — the app runs `claude` in WSL against the file that
+is already there, so the terminal and the app are the *same* session rather
+than two forks of it. Three fields do the work:
+
+```json
+"wslConfig":               {"distro": "Ubuntu"},
+"cwd":                     "/home/you/projects/repo",
+"sshRemoteTranscriptPath": "/home/you/.claude/projects/-home-you-projects-repo/<id>.jsonl"
+```
+
+`eject` is the one command that **forks**. A Windows session's working directory
+has to be reachable from the distro — `C:\you\repo` is visible there as
+`/mnt/c/you/repo`, the same files over drvfs — so it writes a second transcript
+with the `cwd` rewritten, and prints the `wsl … claude --resume` line. The
+Windows session keeps its own. Resume in one place or the other, never both.
+
 ### Let Claude drive it
 
 ```bash
@@ -127,7 +179,7 @@ claude_sessions.py skill --install    # write it to ~/.claude/skills/
 
 Installs a Claude Code skill that teaches Claude when this applies (sessions
 "missing" after an org switch), the storage model, the dry-run-first workflow,
-and the restart-required caveat — so it stops guessing and stops reaching for
+and the cache-reload caveat — so it stops guessing and stops reaching for
 `cp`. Restart Claude Code afterwards to pick it up.
 
 ### "Active" is ambiguous, so `active` gives you all three
@@ -140,6 +192,10 @@ and the restart-required caveat — so it stops guessing and stops reaching for
    real reason you switched orgs in the first place.
 
 ## Safety
+
+Every rule below is stated formally in **[INVARIANTS.md](INVARIANTS.md)** and
+enforced by a named test in `tests/`. The invariant doc lists the test that
+proves each one.
 
 `copy` is built so that a mistake cannot cost you a session:
 
@@ -155,18 +211,45 @@ and the restart-required caveat — so it stops guessing and stops reaching for
 - **Refuses cross-account copies** unless you pass `--allow-cross-account`.
 - **Dry-run by default.**
 
+`adopt` inherits all of that, never writes into the distro, derives its desktop
+UUID from the WSL session id so re-running is idempotent, and resets
+`permissionMode` to `auto` — a session this tool created must not arrive
+pre-authorised to skip tool approval.
+
+`eject` is the exception, and says so loudly: it writes a second transcript.
+
 Imports are recorded in `~/.claude/session-copy-ledger.json` so that copied
-sessions are excluded when building the destination's connector map — otherwise
-the foreign UUIDs you just imported would poison the next copy.
+sessions are excluded when building the destination's connector map. That
+ledger cannot know about a copy made by hand or made before it existed, so the
+map is additionally decided **by majority**: one stray import cannot redefine an
+org's connectors, and a disagreement is reported rather than silently resolved.
+
+## Tests
+
+```bash
+pip install pytest && python -m pytest
+```
+
+`tests/test_safety.py` and `tests/test_formats.py` pin every invariant against
+fixtures. `tests/test_format_drift.py` re-checks the reverse-engineered formats
+against whatever real Claude Code store is on the machine, and skips cleanly
+when there is none — so CI stays green on a bare runner while your own machine
+acts as the canary. If Anthropic changes a format, that file fails first.
 
 ## Caveats
 
+- Flags in `sessions`: `A` archived, `!` transcript missing, `R` ssh/remote,
+  `W` runs in WSL.
 - Sessions flagged `R` are ssh/remote; they resume only if that host is
   reachable.
 - The destination org needs its own native session before the connector map can
   be built. With none, MCP config is stripped and the app repopulates it.
+- `eject` only works for a working directory WSL can reach — a drive path. A UNC
+  path has no spelling inside the distro and is refused rather than guessed at.
+- A `/mnt/c` checkout is the same files as the Windows one, reached over drvfs:
+  slower, with Windows line endings and file modes.
 - Reverse-engineered from on-disk formats, which Anthropic can change without
-  notice. Verified against Claude Code 2.1.229 on Windows.
+  notice. Verified against Claude Code 2.1.233 on Windows 11 with WSL2.
 - Not affiliated with Anthropic.
 
 ## Coda

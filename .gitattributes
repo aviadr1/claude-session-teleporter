@@ -1,0 +1,4 @@
+# the tool is a cross-platform script; keep it LF so windows checkouts do not churn
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
