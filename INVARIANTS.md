@@ -5,7 +5,7 @@ application the user depends on. That earns a higher bar than "the tests pass":
 every rule this file states is enforced by a test in `tests/`, and the test name
 is listed next to it.
 
-Two kinds of rule live here.
+Three kinds of rule live here.
 
 **Safety invariants** are promises about damage. They are what makes it
 reasonable to point this tool at a real session store. If one of them breaks,
@@ -18,6 +18,10 @@ falsified by any Anthropic release. They are tested against fixtures captured
 from real data, and `test_format_drift.py` re-checks them against the live store
 when one is present, so drift surfaces as a failing test rather than a corrupt
 session.
+
+**Packaging invariants** protect the install story. The tool is a single
+standard-library file on purpose; the packaging exists to make that convenient,
+never to make it untrue.
 
 ---
 
@@ -199,6 +203,54 @@ and must still resolve through `sshRemoteTranscriptPath` - otherwise `copy`
 would refuse to move it between orgs under S6.
 
 > `test_wsl_transcript_resolves_without_mirror`
+
+---
+
+---
+
+## Packaging
+
+`pyproject.toml` exists so the test dependency has somewhere to live and so a
+release can be built. It must not quietly change what the tool *is*: a single
+standard-library file you can `curl` onto a machine and run.
+
+Until there was a pyproject, nothing could break that by accident. Now
+something can, so these are pinned too.
+
+### P1 - The tool imports only the standard library
+
+No third-party import, and no sibling module either - a second file would break
+the copy-one-file install just as thoroughly as a dependency would. Checked by
+parsing the source, and end-to-end by running the file alone in a temp
+directory with nothing installed.
+
+> `test_tool_imports_only_the_standard_library`, `test_tool_is_a_single_file`,
+> `test_tool_runs_from_a_bare_interpreter`, plus the `bare-interpreter` CI job
+
+### P2 - The published package declares no runtime dependencies
+
+`dependencies = []`, no optional extras, and the built wheel carries no
+`Requires-Dist`. `pytest` lives in a dependency-group, which is not installed
+for users.
+
+> `test_no_runtime_dependencies`, `test_test_dependencies_are_a_dev_group_not_runtime`,
+> plus the `build` CI job asserting it against the actual wheel
+
+### P3 - One version, in two places, kept equal
+
+Users see `__version__`; a release publishes the `pyproject.toml` version. Drift
+means bug reports quoting a version that was never released. The publish
+workflow additionally refuses to run when the release tag disagrees with either.
+
+> `test_version_matches_the_module`, and the version-check step in
+> `python-publish.yml`
+
+### P4 - The console script resolves, and the wheel is one module
+
+`claude-sessions = claude_sessions:main` has to name something callable, and the
+wheel must contain that module and nothing else.
+
+> `test_console_script_entry_point_resolves`, `test_wheel_ships_the_tool_and_nothing_else`
 
 ---
 

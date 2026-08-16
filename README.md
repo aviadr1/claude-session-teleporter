@@ -86,11 +86,25 @@ cleared  previous crash state
 ## Install
 
 Single file, standard library only, Python 3.10+. **No dependencies, ever** —
-that is a design constraint, not an accident. Drop the file anywhere and run it.
+that is a design constraint, not an accident, and it is
+[enforced by tests](INVARIANTS.md#packaging): the tool may not import anything
+outside the standard library, the wheel carries no `Requires-Dist`, and CI runs
+the bare file on an interpreter with nothing installed.
+
+So the simplest install is still the best one — drop the file anywhere and run
+it:
 
 ```bash
 curl -o ~/.claude/tools/claude_sessions.py \
   https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/claude_sessions.py
+```
+
+Or, if you would rather have it on your PATH:
+
+```bash
+uv tool install claude-session-teleporter   # then: claude-sessions --help
+uvx claude-session-teleporter partitions    # or run it without installing
+pipx install claude-session-teleporter
 ```
 
 Windows is the primary target (that is where the paths were verified). macOS and
@@ -224,17 +238,30 @@ ledger cannot know about a copy made by hand or made before it existed, so the
 map is additionally decided **by majority**: one stray import cannot redefine an
 org's connectors, and a disagreement is reported rather than silently resolved.
 
-## Tests
+## Development
+
+[uv](https://docs.astral.sh/uv/) handles the dev environment. The tool itself
+still has no dependencies — `pytest` lives in a dependency-group, so it is never
+installed for users.
 
 ```bash
-pip install pytest && python -m pytest
+uv run pytest             # the suite; uv creates the env on first run
+uv run pytest -m drift    # only the checks against your real session store
+uv build                  # wheel + sdist
+uv run claude-sessions --help
 ```
 
-`tests/test_safety.py` and `tests/test_formats.py` pin every invariant against
-fixtures. `tests/test_format_drift.py` re-checks the reverse-engineered formats
-against whatever real Claude Code store is on the machine, and skips cleanly
-when there is none — so CI stays green on a bare runner while your own machine
-acts as the canary. If Anthropic changes a format, that file fails first.
+`tests/test_safety.py`, `tests/test_formats.py` and `tests/test_packaging.py`
+pin every invariant in [INVARIANTS.md](INVARIANTS.md) against fixtures.
+
+`tests/test_format_drift.py` re-checks the reverse-engineered formats against
+whatever real Claude Code store is on the machine, and skips cleanly when there
+is none — so CI stays green on a bare runner while your own machine acts as the
+canary. If Anthropic changes a format, that file fails first. It is not
+theoretical: it is how the connector-map bug in `copy` was found.
+
+The suite is checked by **mutation**, not coverage — deliberately break an
+invariant and a named test must go red. If you add one, break it first.
 
 ## Caveats
 
