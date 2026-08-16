@@ -1,6 +1,6 @@
-# claude-session-tools
+# Claude Session Teleporter
 
-Find and move Claude Code desktop sessions between account/org partitions.
+Teleport Claude Code desktop sessions between account/org partitions.
 
 If you use Claude Code under more than one organization — a work org and a
 personal Max plan, say — the desktop app shows you **only the partition you are
@@ -71,7 +71,7 @@ Single file, standard library only, Python 3.10+.
 
 ```bash
 curl -o ~/.claude/tools/claude_sessions.py \
-  https://raw.githubusercontent.com/aviadr1/claude-session-tools/main/claude_sessions.py
+  https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/claude_sessions.py
 ```
 
 Windows is the primary target (that is where the paths were verified). macOS and
