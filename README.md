@@ -1,5 +1,8 @@
 # Claude Session Teleporter
 
+> **Oh, you _can_ take it with you.**
+> Out of quota, not out of context.
+
 Teleport Claude Code desktop sessions between account/org partitions.
 
 If you use Claude Code under more than one organization — a work org and a
@@ -142,6 +145,26 @@ the foreign UUIDs you just imported would poison the next copy.
 - Reverse-engineered from on-disk formats, which Anthropic can change without
   notice. Verified against Claude Code 2.1.229 on Windows.
 - Not affiliated with Anthropic.
+
+## Coda
+
+> They said that what you leave behind is lost,
+> that each account must keep its own domain,
+> that signing out is simply what it cost,
+> and two-and-twenty threads went down the drain.
+>
+> But nothing left. It never touched a cloud.
+> It sat in JSON, filed beneath a name;
+> no window showed it, nothing spoke aloud —
+> invisible, and present all the same.
+>
+> The transcript never moves; the pointer flies.
+> But copy plain, and half of you stays back:
+> a ghost that calls its tools, and none replies,
+> and names you knew fall silent through the crack.
+>
+> &nbsp;&nbsp;&nbsp;&nbsp;So teleport, and let the app restart —
+> &nbsp;&nbsp;&nbsp;&nbsp;oh, you _can_ take it with you. Every part.
 
 ## License
 
