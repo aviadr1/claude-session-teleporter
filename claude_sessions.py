@@ -30,6 +30,10 @@ Commands:
   active       explain which partition is "active", three ways
   copy         copy sessions between partitions (dry-run by default)
   label        give a partition a human-readable name
+  guide        print a start-to-finish walkthrough
+  skill        print or install a Claude Code skill for this tool
+
+Run `--help` for examples, or `guide` for the long version.
 
 Safety invariants for `copy`:
   * never overwrites an existing session in the destination (no --force exists)
@@ -77,6 +81,9 @@ LEDGER_PATH = Path.home() / ".claude" / "session-copy-ledger.json"
 # fields that describe a dead process or a past crash - never carry them over
 VOLATILE_FIELDS = ("sshRemoteProcessId",)
 ERROR_FIELDS = ("error", "errorAt", "errorCategory")
+
+__version__ = "1.0.0"
+SKILL_DIR = Path.home() / ".claude" / "skills" / "claude-session-teleporter"
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +768,224 @@ def cmd_copy(args) -> int:
     return 0
 
 
+SKILL_MD = '''---
+name: claude-session-teleporter
+description: Find and move Claude Code sessions between account/org partitions. Use when the user says sessions are "missing", "gone", or "not showing up" after switching orgs or accounts, asks where Claude Code stores sessions, wants to continue a session from their other org, or hits a rate limit on one org and wants their work available in another.
+user-invocable: true
+allowed-tools:
+  - Bash(python *)
+  - Read
+---
+
+# Claude Session Teleporter
+
+`{tool}` moves Claude Code desktop sessions between account/org partitions.
+
+## When this applies
+
+The user signed into a different org (or a different account) and their sessions
+vanished from the app. **The sessions are not lost.** The desktop app shows only
+the partition it is currently signed into; everything else is still on disk.
+
+Reach for this skill when you hear: sessions missing after an org switch, "where
+are my sessions stored", "are they in the cloud", wanting to continue work from
+the other org, or running out of quota on one org while work sits in another.
+
+## Mental model
+
+Learn these three facts before touching anything:
+
+1. **Everything is local.** Nothing about a session is in the cloud, and nothing
+   syncs between machines. Metadata lives in
+   `%APPDATA%/Claude/claude-code-sessions/<accountUuid>/<orgUuid>/local_<id>.json`.
+2. **Metadata is partitioned by account and org; transcripts are not.**
+   Transcripts sit in `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`,
+   shared by every partition. So "moving" a session copies one small JSON file -
+   the conversation itself never moves and is never duplicated.
+3. **The app caches its session index in memory.** There is no filesystem
+   watcher and no reload hook. After copying, the user MUST restart the Claude
+   desktop app before anything appears. Tell them this every time - otherwise
+   they will conclude the copy failed.
+
+## Workflow
+
+Always run in this order. Never skip the dry run.
+
+```bash
+python {tool} partitions              # what partitions exist, quota left in each
+python {tool} sessions -p <selector>  # unarchived sessions there
+python {tool} copy --from <selector>  # DRY RUN - shows the plan, writes nothing
+python {tool} copy --from <selector> --apply
+```
+
+Partition selectors: a label, an org-uuid prefix, or `active` / `last-active` /
+`most-quota`. Label a partition once so the user stops reading UUIDs:
+
+```bash
+python {tool} label 3c426532 work
+```
+
+Session selectors for `-s`: an id prefix or a title substring, repeatable.
+Copy a single session first to prove the round trip before doing all of them.
+
+## What `copy` guarantees
+
+State these when the user asks whether it is safe:
+
+- Never overwrites an existing session (exclusive create; there is no `--force`).
+- Never resurrects something deleted in the destination (skips `deleted_<id>`
+  tombstones).
+- Never modifies or removes anything in the source partition.
+- Never duplicates transcripts.
+- Refuses sessions whose transcript is missing - nothing to continue.
+- Refuses cross-account copies without `--allow-cross-account`.
+- Dry run by default.
+
+## The non-obvious part
+
+A plain `cp` of the metadata produces a broken session. Two fields are
+org-scoped: `remoteMcpServersConfig` gives the *same* connector a **different
+UUID in each org**, and `enabledMcpTools` is keyed `"<serverUuid>:<toolName>"`.
+Copied as-is, the session points at connectors that do not exist in the
+destination. The tool remaps by connector name and drops connectors the
+destination org lacks; the dry run prints exactly what it will remap.
+
+Never hand-copy these files with `cp` or `Copy-Item` as a shortcut.
+
+## Gotchas
+
+- Sessions flagged `R` are ssh/remote; they resume only if that host is
+  reachable. Prefer a local session when proving the mechanism works.
+- The destination org needs at least one native session before a connector map
+  can be built. With none, MCP config is stripped and the app repopulates it.
+- `~/.claude/session-copy-ledger.json` records imports so previously copied
+  sessions do not poison the connector map. Do not hand-edit it.
+- Formats are reverse-engineered and Anthropic can change them. If output looks
+  wrong, inspect a session JSON with `Read` before acting.
+'''
+
+
+GUIDE = """\
+{h}
+ CLAUDE SESSION TELEPORTER - WALKTHROUGH
+{h}
+
+THE PROBLEM
+
+  You signed into a different org and your sessions vanished. They are not
+  gone. Claude Code stores sessions on local disk, partitioned by account AND
+  org, and the desktop app shows you only the partition you are signed into.
+  Everything else is sitting there, invisible.
+
+  Nothing is in the cloud. Nothing syncs between machines.
+
+HOW IT IS STORED
+
+  metadata    %APPDATA%/Claude/claude-code-sessions/<account>/<org>/local_<id>.json
+  transcript  ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
+  tombstone   .../<org>/deleted_<id>
+
+  Metadata is partitioned. Transcripts are NOT - every partition shares one
+  pool. So teleporting a session copies one small JSON file. The conversation
+  itself never moves and is never duplicated.
+
+STEP 1 - SEE WHAT YOU HAVE
+
+  $ {tool} partitions
+
+  One row per account/org partition. The one marked {dot} is where you are
+  signed in. QUOTA LEFT is parsed from your plan usage history and is usually
+  the reason you switched orgs in the first place.
+
+STEP 2 - NAME THEM
+
+  $ {tool} label 3c426532 work
+
+  Now "work" works anywhere a selector is accepted, instead of a uuid prefix.
+
+STEP 3 - LOOK AT WHAT IS OVER THERE
+
+  $ {tool} sessions -p work
+
+  Unarchived only, newest first. Flags in the FLG column:
+     A   archived
+     !   transcript missing - cannot be continued
+     R   ssh/remote - resumes only if that host is reachable
+
+STEP 4 - DRY RUN
+
+  $ {tool} copy --from work
+
+  Prints a direction diagram, the per-session plan, and every fix it would
+  apply. Writes nothing. Read it. The FIX column counts the repairs a naive
+  copy would have skipped.
+
+  Destination defaults to the partition you are signed into, which is almost
+  always what you want - that is the only one the app can show you.
+
+STEP 5 - DO IT
+
+  $ {tool} copy --from work -s 5651 --apply     # one session first
+  $ {tool} copy --from work --apply             # then the rest
+
+  Copy one and confirm the round trip before moving everything.
+
+STEP 6 - RESTART CLAUDE
+
+  This is not optional. The app caches its session index in memory. There is
+  no filesystem watcher and no reload hook, so nothing you copied will appear
+  until Claude restarts. If it seems like the copy failed, this is why.
+
+WHY NOT JUST cp
+
+  Session metadata is not org-portable. The same MCP connector has a DIFFERENT
+  uuid in each org, and enabledMcpTools is keyed "<serverUuid>:<toolName>".
+  Copy the file as-is and the session lands pointing at connectors that do not
+  exist where it landed. This remaps them by name and drops what the
+  destination org does not have.
+
+WHAT CANNOT GO WRONG
+
+  Never overwrites an existing session - exclusive create, and there is no
+  --force flag by design. Never resurrects something you deleted in the
+  destination. Never modifies the source. Never duplicates transcripts.
+  Refuses sessions with no transcript. Dry run unless you pass --apply.
+
+WHEN IT LOOKS WRONG
+
+  $ {tool} active            three readings of which partition is "active"
+  $ {tool} partitions        confirm connectors were detected in both orgs
+  $ CLAUDE_SESSIONS_ROOT=... override store detection
+
+  Formats here are reverse-engineered and can change without notice.
+
+  $ {tool} skill --install   teach Claude Code to drive this for you
+{h}
+"""
+
+
+def cmd_guide(args) -> int:
+    tool = Path(sys.argv[0]).name or "claude_sessions.py"
+    print(GUIDE.replace("{h}", G.h * 74).replace("{tool}", tool).replace("{dot}", G.dot), end="")
+    return 0
+
+
+def cmd_skill(args) -> int:
+    tool = Path(sys.argv[0]).name or "claude_sessions.py"
+    body = SKILL_MD.replace("{tool}", tool)
+    if not args.install:
+        print(body, end="")
+        return 0
+    target = Path(args.path) if args.path else SKILL_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    dest = target / "SKILL.md"
+    existed = dest.exists()
+    dest.write_text(body, encoding="utf-8")
+    print(f"{G.check} {'replaced' if existed else 'installed'} {dest}")
+    print("Restart Claude Code (or start a new session) to pick up the skill.")
+    return 0
+
+
 def cmd_label(args) -> int:
     p = resolve_partition(load_partitions(), args.partition)
     labels = _read_json(LABELS_PATH, {})
@@ -773,37 +998,149 @@ def cmd_label(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+DESCRIPTION = """\
+Teleport Claude Code desktop sessions between account/org partitions.
+
+The desktop app shows only the partition you are signed into, so sessions from
+another org look missing even though they are on disk. This finds them and
+copies them into the partition you are signed into.
+
+Session metadata is partitioned by account and org; transcripts are shared, so
+a copy moves one small JSON file and never duplicates a conversation.
+"""
+
+EPILOG = """\
+examples:
+  claude_sessions.py partitions                    what partitions exist, and quota left
+  claude_sessions.py label 3c426532 work           stop reading UUIDs
+  claude_sessions.py sessions -p work              unarchived sessions over there
+  claude_sessions.py active                        which partition is "active", three ways
+  claude_sessions.py copy --from work              DRY RUN of the whole migration
+  claude_sessions.py copy --from work -s 5651 --apply    copy one, for real
+  claude_sessions.py skill --install               teach Claude Code to drive this
+
+selectors:
+  partition   a label, an org-uuid prefix, or one of: active, last-active, most-quota
+  session     an id prefix or a title substring (-s is repeatable)
+
+note:
+  The app caches its session index in memory. Restart Claude after copying,
+  or the copies will not appear.
+
+storage:
+  metadata    %APPDATA%/Claude/claude-code-sessions/<accountUuid>/<orgUuid>/local_<id>.json
+  transcript  ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
+
+Override store detection with the CLAUDE_SESSIONS_ROOT environment variable.
+https://github.com/aviadr1/claude-session-teleporter
+"""
+
+COPY_EPILOG = """\
+safety:
+  Never overwrites an existing session - exclusive create, and there is
+  deliberately no --force flag. Never resurrects a session deleted in the
+  destination. Never modifies the source. Never duplicates transcripts.
+  Refuses sessions whose transcript is missing. Dry run unless --apply.
+
+port fixes:
+  Metadata is not org-portable as-is: the same MCP connector has a different
+  uuid in each org, and enabledMcpTools is keyed by that uuid. Connectors are
+  remapped by name, ones the destination lacks are dropped, and stale crash and
+  ssh state is cleared. The dry run prints every fix before you commit to it.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
+    fmt = argparse.RawDescriptionHelpFormatter
     ap = argparse.ArgumentParser(
-        prog="claude_sessions",
-        description="Inspect and migrate Claude Code sessions across account/org partitions.",
+        prog="claude_sessions.py",
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=fmt,
     )
     ap.add_argument("--ascii", action="store_true", help="force plain ASCII output")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+    sub = ap.add_subparsers(dest="cmd", metavar="COMMAND", required=True)
 
-    sub.add_parser("partitions", help="list account/org partitions").set_defaults(fn=cmd_partitions)
+    pp = sub.add_parser(
+        "partitions",
+        help="list account/org partitions",
+        description="List every account/org partition on this machine, with session counts, "
+        "plan quota remaining, and the MCP connectors each org knows about. "
+        "The signed-in partition is marked.",
+        formatter_class=fmt,
+    )
+    pp.set_defaults(fn=cmd_partitions)
 
-    sp = sub.add_parser("sessions", help="list sessions in each partition")
-    sp.add_argument("-p", "--partition", help="selector: label, org uuid prefix, or 'active'")
+    sp = sub.add_parser(
+        "sessions",
+        help="list sessions in a partition",
+        description="List sessions, unarchived only by default. Flags: A=archived, "
+        "!=transcript missing, R=ssh/remote.",
+        formatter_class=fmt,
+    )
+    sp.add_argument("-p", "--partition", metavar="SEL", help="label, org uuid prefix, or 'active'")
     sp.add_argument("-a", "--all", action="store_true", help="include archived sessions")
     sp.set_defaults(fn=cmd_sessions)
 
-    sub.add_parser("active", help="explain which partition is active").set_defaults(fn=cmd_active)
+    ap_ = sub.add_parser(
+        "active",
+        help='explain which partition is "active"',
+        description='"Active" is ambiguous, so all three readings are reported: the signed-in '
+        "partition (authoritative), the most recently used, and the one with the most plan "
+        "quota left. copy defaults to the signed-in one.",
+        formatter_class=fmt,
+    )
+    ap_.set_defaults(fn=cmd_active)
 
-    cp = sub.add_parser("copy", help="copy sessions between partitions (dry-run by default)")
-    cp.add_argument("--from", dest="source", help="source partition (default: the only other one with work)")
-    cp.add_argument("--to", help="destination partition (default: the signed-in one)")
-    cp.add_argument("-s", "--session", action="append", default=[], help="id/prefix/title substring (repeatable)")
+    cp = sub.add_parser(
+        "copy",
+        help="copy sessions between partitions (dry run by default)",
+        description="Copy sessions from one partition into another, remapping org-scoped "
+        "connector uuids on the way. Prints a plan and exits unless --apply is given.",
+        epilog=COPY_EPILOG,
+        formatter_class=fmt,
+    )
+    cp.add_argument("--from", dest="source", metavar="SEL", help="source partition (default: the only other one with work)")
+    cp.add_argument("--to", metavar="SEL", help="destination partition (default: the signed-in one)")
+    cp.add_argument("-s", "--session", action="append", default=[], metavar="SEL", help="id prefix or title substring (repeatable)")
     cp.add_argument("--include-archived", action="store_true", help="also copy archived sessions")
     cp.add_argument("--keep-error", action="store_true", help="preserve previous crash state")
     cp.add_argument("--allow-cross-account", action="store_true", help="permit copying between accounts")
-    cp.add_argument("--apply", action="store_true", help="actually write (default is dry-run)")
+    cp.add_argument("--apply", action="store_true", help="actually write (default is dry run)")
     cp.set_defaults(fn=cmd_copy)
 
-    lp = sub.add_parser("label", help="give a partition a readable name")
-    lp.add_argument("partition")
-    lp.add_argument("name")
+    lp = sub.add_parser(
+        "label",
+        help="give a partition a readable name",
+        description=f"Store a human-readable name for a partition in {LABELS_PATH}, so you can "
+        "refer to it by name instead of a uuid prefix.",
+        formatter_class=fmt,
+    )
+    lp.add_argument("partition", metavar="SEL", help="label, org uuid prefix, or 'active'")
+    lp.add_argument("name", help="the name to give it, e.g. work")
     lp.set_defaults(fn=cmd_label)
+
+    gp = sub.add_parser(
+        "guide",
+        help="print a full walkthrough",
+        description="Print a start-to-finish walkthrough: how sessions are stored, why they "
+        "look missing, and the exact sequence to get them back. Read this first.",
+        formatter_class=fmt,
+    )
+    gp.set_defaults(fn=cmd_guide)
+
+    kp = sub.add_parser(
+        "skill",
+        help="print or install a Claude Code skill for this tool",
+        description="Emit a SKILL.md that teaches Claude Code how and when to drive this tool. "
+        "Prints to stdout by default; --install writes it where Claude Code will find it.",
+        epilog=f"default install path:\n  {SKILL_DIR / 'SKILL.md'}\n",
+        formatter_class=fmt,
+    )
+    kp.add_argument("--install", action="store_true", help="write the skill instead of printing it")
+    kp.add_argument("--path", metavar="DIR", help="install into DIR instead of the default")
+    kp.set_defaults(fn=cmd_skill)
 
     args = ap.parse_args(argv)
     global G

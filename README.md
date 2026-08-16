@@ -70,7 +70,8 @@ cleared  previous crash state
 
 ## Install
 
-Single file, standard library only, Python 3.10+.
+Single file, standard library only, Python 3.10+. **No dependencies, ever** —
+that is a design constraint, not an accident. Drop the file anywhere and run it.
 
 ```bash
 curl -o ~/.claude/tools/claude_sessions.py \
@@ -82,6 +83,16 @@ Linux paths are implemented but untested — set `CLAUDE_SESSIONS_ROOT` to
 override if detection is wrong.
 
 ## Usage
+
+Start here — a full walkthrough, printed to your terminal:
+
+```bash
+claude_sessions.py guide      # the whole story, start to finish
+claude_sessions.py --help     # traditional help, with examples
+claude_sessions.py copy -h    # per-command help, incl. safety and port fixes
+```
+
+Then the commands themselves:
 
 ```bash
 # what partitions exist, and how much plan quota each has left
@@ -106,6 +117,18 @@ claude_sessions.py copy --from work -s 5651c527 --apply
 
 `copy` prints a direction diagram, the per-session plan, and the port fixes it
 would apply, then stops. Nothing is written without `--apply`.
+
+### Let Claude drive it
+
+```bash
+claude_sessions.py skill              # print the SKILL.md
+claude_sessions.py skill --install    # write it to ~/.claude/skills/
+```
+
+Installs a Claude Code skill that teaches Claude when this applies (sessions
+"missing" after an org switch), the storage model, the dry-run-first workflow,
+and the restart-required caveat — so it stops guessing and stops reaching for
+`cp`. Restart Claude Code afterwards to pick it up.
 
 ### "Active" is ambiguous, so `active` gives you all three
 
