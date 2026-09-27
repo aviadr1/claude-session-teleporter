@@ -1,14 +1,16 @@
-# Publish to PyPI when a GitHub Release is published.
+# Publish to PyPI when a version tag is pushed (v1.2.3).
 #
 # Uses trusted publishing (OIDC), so there is no API token to store: configure
 # the publisher once at https://pypi.org/manage/account/publishing/ against this
 # repository, this workflow filename, and the `pypi` environment below.
+# The tag must match the version in pyproject.toml; a leading "v" is ignored.
 
 name: Upload Python Package
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -35,7 +37,7 @@ jobs:
           print(f"ok: publishing {proj}")
           PY
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
 
       - name: Test before publishing
         run: uv run --frozen pytest -q

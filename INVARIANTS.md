@@ -240,7 +240,8 @@ for users.
 
 Users see `__version__`; a release publishes the `pyproject.toml` version. Drift
 means bug reports quoting a version that was never released. The publish
-workflow additionally refuses to run when the release tag disagrees with either.
+workflow, triggered by a `v*` tag, refuses to run when that tag disagrees
+with either.
 
 > `test_version_matches_the_module`, and the version-check step in
 > `python-publish.yml`
@@ -251,6 +252,17 @@ workflow additionally refuses to run when the release tag disagrees with either.
 wheel must contain that module and nothing else.
 
 > `test_console_script_entry_point_resolves`, `test_wheel_ships_the_tool_and_nothing_else`
+
+### P5 - The installed skill's commands work from any directory
+
+`skill --install` writes the command Claude will run into `SKILL.md`, and Claude
+runs it from whatever project it is in. So the command must not depend on the
+current directory: a script is named by its absolute path (`python
+/home/you/.claude/tools/claude_sessions.py`), an installed console script by its
+name (`claude-sessions`, never `python claude-sessions`), and `allowed-tools`
+permits exactly that command.
+
+> `test_skill_commands_run_from_any_directory`, `test_skill_calls_the_console_script_by_name`
 
 ---
 
