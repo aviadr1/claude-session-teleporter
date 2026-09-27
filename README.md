@@ -1,16 +1,126 @@
 # Claude Session Teleporter
 
+[![tests](https://github.com/aviadr1/claude-session-teleporter/actions/workflows/tests.yml/badge.svg)](https://github.com/aviadr1/claude-session-teleporter/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/github/license/aviadr1/claude-session-teleporter)](https://github.com/aviadr1/claude-session-teleporter/blob/main/LICENSE)
+[![python: 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/aviadr1/claude-session-teleporter/blob/main/pyproject.toml)
+[![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)](https://github.com/aviadr1/claude-session-teleporter/blob/main/INVARIANTS.md#packaging)
+
 > **Oh, you _can_ take it with you.**
 > Out of quota, not out of context.
 
-Teleport Claude Code sessions between account/org partitions, and between WSL
-and the Windows desktop app.
+**Your Claude Code sessions aren't gone. They're under the other org.**
 
-If you use Claude Code under more than one organization — a work org and a
-personal Max plan, say — the desktop app shows you **only the partition you are
-currently signed into**. Sessions from your other org are still on disk, they
-are simply invisible. This tool finds them, and copies them into the partition
-you are signed into so you can carry on.
+Switch orgs or accounts in the Claude desktop app and your sessions vanish from
+the list. Run `claude` inside WSL and the Windows app never shows those sessions
+at all. Either way, every session is still on your disk. This tool finds them
+and puts them back in the app, so you can pick up where you left off, even when
+the org you were using has run out of quota.
+
+## Quick start
+
+With [uv](https://docs.astral.sh/uv/):
+
+```bash
+# every org on this machine, its sessions, and how much quota it has left (read-only)
+uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions partitions
+
+# install it, then copy the other org's sessions into the one you are signed into
+uv tool install git+https://github.com/aviadr1/claude-session-teleporter
+claude-sessions copy            # dry run: prints the plan, writes nothing
+claude-sessions copy --apply    # do it
+```
+
+With more than two orgs, `copy` asks you to pick one with `--from`, using a name
+or UUID prefix from the `partitions` list. After `--apply`, **switch accounts in
+the app** (or restart it). The app caches its session list and only re-reads
+the disk when you do.
+
+No uv? The tool is [one standard-library file](#install) you can download and run.
+
+## What it looks like
+
+This is real output from a demo store: one login with two orgs, `work` and
+`personal`. You are signed into `personal`, so the app shows only its one
+session. `work` holds two more, and it has 2% of its quota left.
+
+```
+$ claude-sessions partitions
+PARTITION   ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
+──────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ───────────────────────
+  work      3c426532-1eaa-4e6f-93c1-4d30abca7b89  1eb44d48    3       2    0  2026-09-27 17:31  ░░░░░░░░░░░░ 2%   Datadog, Linear, Sentry
+● personal  762f7f2a-1cab-4c8a-98d1-d53bf5e8872c  1eb44d48    1       1    0  2026-09-27 16:31  ███████████░ 88%  Linear, Sentry
+```
+
+A dry run shows exactly what would happen, including the connector fixes a
+plain file copy would miss (see [below](#the-part-that-makes-a-naive-cp-wrong)):
+
+```
+$ claude-sessions copy --from work
+
+┌────────────────────────────────────┐            ┌────────────────────────────────────┐
+│ SOURCE                             │            │ TARGET   ● signed in               │
+│ ────────────────────────────────── │            │ ────────────────────────────────── │
+│ work                               │            │ personal                           │
+│ org  3c426532-1eaa-4e6f-93c1-4d30… │            │ org  762f7f2a-1cab-4c8a-98d1-d53b… │
+│ acct 1eb44d48…                     │            │ acct 1eb44d48…                     │
+│                                    │ ═══ 2 ═══▶ │                                    │
+│ 3 sessions · 2 unarchived          │            │ 1 sessions · 1 unarchived          │
+│ last active 2026-09-27 17:31       │            │ last active 2026-09-27 16:31       │
+│ connectors  Datadog, Linear, Sent… │            │ connectors  Linear, Sentry         │
+│                                    │            │                                    │
+│ quota left ░░░░░░░░░░░░░░░░ 2%     │            │ quota left ██████████████░░ 88%    │
+└────────────────────────────────────┘            └────────────────────────────────────┘
+
+   ACTION          ID        LAST ACTIVITY     TITLE                     BRANCH/DIR  FIX
+─  ──────────────  ────────  ────────────────  ────────────────────────  ──────────  ───
+✓  COPY            5651c527  2026-09-27 17:31  Fix flaky auth test       api         7
+✓  COPY            7c0ffee0  2026-09-27 13:31  Migrate billing webhooks  api         6
+✗  skip: archived  0ddba11a  2026-09-24 00:31  Old spike                 api
+
+port fixes applied (FIX column counts these per session):
+   2x  remapped Linear tool keys: 01812872 ▶ 4b57c823
+   2x  remapped Sentry tool keys: e5c4f439 ▶ be036bca
+   2x  dropped stale tool keys for Datadog (9d1a0b7e)
+   2x  remapped Linear: 01812872 ▶ 4b57c823
+   2x  remapped Sentry: e5c4f439 ▶ be036bca
+   2x  dropped Datadog (9d1a0b7e) - not present in personal
+   1x  cleared previous crash state
+
+2 COPY   1 skip: archived
+transcripts are shared on disk - none are copied or duplicated.
+
+DRY RUN. Nothing written. Re-run with --apply to copy 2 session(s).
+```
+
+Apply it, and the signed-in org has all three:
+
+```
+$ claude-sessions copy --from work --apply
+...
+✓ 5651c527  Fix flaky auth test
+✓ 7c0ffee0  Migrate billing webhooks
+
+Copied 2 session(s) into personal (762f7f2a-1cab-4c8a-98d1-d53bf5e8872c).
+The app caches its session list in memory. Switch accounts in the app to
+force a reload - faster than restarting it, and it works just as well.
+
+$ claude-sessions sessions -p personal
+personal  (762f7f2a-1cab-4c8a-98d1-d53bf5e8872c)  ● signed in
+─────────────────────────────────────────────────────────────
+FLG  ID        LAST ACTIVITY     TITLE                     BRANCH/DIR  WSL
+───  ────────  ────────────────  ────────────────────────  ──────────  ───
+     5651c527  2026-09-27 17:31  Fix flaky auth test       api
+     b16b00b5  2026-09-27 15:31  Blog post draft           blog
+     7c0ffee0  2026-09-27 13:31  Migrate billing webhooks  api
+(3 unarchived of 3)   flags: A=archived  !=transcript missing  R=ssh/remote  W=runs in WSL
+```
+
+## Two reasons a session goes missing
+
+If you use Claude Code under more than one organization, say a work org and a
+personal Max plan, the desktop app shows you **only the partition you are
+currently signed into**. Sessions from your other org are still on disk. They
+are just not shown. `copy` puts them into the partition you are signed into.
 
 Sessions you started by running `claude` inside WSL are invisible for a
 different reason: they have **no desktop metadata at all**, so no org you sign
@@ -18,20 +128,8 @@ into will ever show them. That is a separate axis, with a separate fix.
 
 | axis | what differs | command |
 |---|---|---|
-| **partition** | account/org — same machine, same transcripts | `copy` |
-| **host** | WSL vs Windows — different filesystem, different install | `adopt` / `eject` |
-
-```
-$ claude_sessions.py partitions
-
-session store: C:\Users\you\AppData\Roaming\Claude\claude-code-sessions
-transcripts:   C:\Users\you\.claude\projects
-
-PARTITION    ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
-───────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ──────────────────────────────────
-  work       3c426532-1eaa-4e6f-93c1-4d30abca7b89  1eb44d48   22       9    2  2026-08-16 13:15  ░░░░░░░░░░░░ 2%   Datadog, Linear, Sentry, visualize
-● personal   762f7f2a-1cab-4c8a-98d1-d53bf5e8872c  1eb44d48    3       3    0  2026-08-16 13:36  ████████████ 99%  Datadog, Linear, Sentry, visualize
-```
+| **partition** | account/org: same machine, same transcripts | `copy` |
+| **host** | WSL vs Windows: different filesystem, different install | `adopt` / `eject` |
 
 ## How Claude Code stores sessions
 
@@ -49,11 +147,11 @@ Three consequences drive this whole tool:
 1. **Metadata is partitioned by account *and* org; transcripts are not.** Two
    orgs under the same login get separate metadata folders but share one
    transcript pool. So moving a session between partitions means copying a small
-   JSON file — the conversation itself never moves or gets duplicated.
+   JSON file. The conversation itself never moves and is never duplicated.
 
 2. **The app caches its session index in memory.** Files written while it is
    running are not noticed; there is no filesystem watcher and no reload hook.
-   Make it re-read disk afterwards — **switching accounts in the app is enough,
+   Make it re-read disk afterwards. **Switching accounts in the app is enough,
    and is faster than restarting it.** Restarting works too.
 
 3. **WSL is a third place entirely.** A distro has its own `~/.claude` with its
@@ -64,35 +162,48 @@ Three consequences drive this whole tool:
 
 Session metadata is **not org-portable as-is**. Two fields are org-scoped:
 
-- `remoteMcpServersConfig` — the *same* connector has a **different UUID in each
+- `remoteMcpServersConfig`: the *same* connector has a **different UUID in each
   org**. Linear might be `01812872…` in your work org and `4b57c823…` in your
   personal one.
-- `enabledMcpTools` — keyed `"<serverUuid>:<toolName>"`, so every one of those
+- `enabledMcpTools`: keyed `"<serverUuid>:<toolName>"`, so every one of those
   keys inherits the stale UUID.
 
 Copy the file as-is and the session lands pointing at connectors that do not
 exist in the destination org. This tool remaps them by connector *name*, builds
 the destination's name→UUID map from its own native sessions, and drops
-connectors the destination org does not have:
+connectors the destination org does not have. It also clears the source's stale
+runtime state. From the dry run above:
 
 ```
-remapped Linear: 01812872 ▶ 4b57c823
-remapped Sentry: e5c4f439 ▶ be036bca
-dropped  Datadog          (no equivalent in the destination)
-stripped stale sshRemoteProcessId
-cleared  previous crash state
+   2x  remapped Linear: 01812872 ▶ 4b57c823
+   2x  remapped Sentry: e5c4f439 ▶ be036bca
+   2x  dropped Datadog (9d1a0b7e) - not present in personal
+   1x  cleared previous crash state
 ```
 
 ## Install
 
-Single file, standard library only, Python 3.10+. **No dependencies, ever** —
-that is a design constraint, not an accident, and it is
-[enforced by tests](INVARIANTS.md#packaging): the tool may not import anything
-outside the standard library, the wheel carries no `Requires-Dist`, and CI runs
-the bare file on an interpreter with nothing installed.
+Single file, standard library only, Python 3.10+. **No dependencies, ever.**
+That is a design constraint, not an accident, and it is
+[enforced by tests](https://github.com/aviadr1/claude-session-teleporter/blob/main/INVARIANTS.md#packaging):
+the tool may not import anything outside the standard library, the wheel
+carries no `Requires-Dist`, and CI runs the bare file on an interpreter with
+nothing installed.
 
-So the simplest install is still the best one — drop the file anywhere and run
-it:
+**With uv** (puts `claude-sessions` on your PATH):
+
+```bash
+uv tool install git+https://github.com/aviadr1/claude-session-teleporter
+claude-sessions --help
+```
+
+Or run it once without installing:
+
+```bash
+uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions --help
+```
+
+**As a single file.** In bash (WSL, macOS, Linux, Git Bash):
 
 ```bash
 mkdir -p ~/.claude/tools
@@ -101,56 +212,57 @@ curl -o ~/.claude/tools/claude_sessions.py \
 python3 ~/.claude/tools/claude_sessions.py --help
 ```
 
-Or run it from the repository. The console script is `claude-sessions`:
+In PowerShell:
 
-```bash
-uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions --help
-uv tool install git+https://github.com/aviadr1/claude-session-teleporter   # then: claude-sessions --help
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.claude\tools" | Out-Null
+curl.exe -o "$HOME\.claude\tools\claude_sessions.py" `
+  https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/claude_sessions.py
+python "$HOME\.claude\tools\claude_sessions.py" --help
 ```
 
-After the first release is published to PyPI, the same commands work from the
-index:
-
-```bash
-uv tool install claude-session-teleporter   # then: claude-sessions --help
-uvx --from claude-session-teleporter claude-sessions --help
-```
+**PyPI:** not published yet, so install from GitHub as above. Once it is,
+`uv tool install claude-session-teleporter` will work. Do not install
+`claude-sessions` from PyPI: that name belongs to an unrelated project.
 
 Windows is the primary target (that is where the paths were verified). macOS and
-Linux paths are implemented but untested — set `CLAUDE_SESSIONS_ROOT` to
+Linux paths are implemented but untested. Set `CLAUDE_SESSIONS_ROOT` to
 override if detection is wrong.
 
 ## Usage
 
-Start here — a full walkthrough, printed to your terminal:
+The examples use `claude-sessions`, the installed command. With the single
+file, run `python claude_sessions.py` instead.
+
+Start here. A full walkthrough, printed to your terminal:
 
 ```bash
-claude_sessions.py guide      # the whole story, start to finish
-claude_sessions.py --help     # traditional help, with examples
-claude_sessions.py copy -h    # per-command help, incl. safety and port fixes
+claude-sessions guide      # the whole story, start to finish
+claude-sessions --help     # traditional help, with examples
+claude-sessions copy -h    # per-command help, incl. safety and port fixes
 ```
 
 Then the commands themselves:
 
 ```bash
 # what partitions exist, and how much plan quota each has left
-claude_sessions.py partitions
+claude-sessions partitions
 
 # name one so you stop reading UUIDs
-claude_sessions.py label 3c426532 work
+claude-sessions label 3c426532 work
 
 # unarchived sessions (flags: A=archived  !=transcript missing  R=ssh/remote  W=WSL)
-claude_sessions.py sessions -p work
-claude_sessions.py sessions -p work --all
+claude-sessions sessions -p work
+claude-sessions sessions -p work --all
 
 # which partition is "active"? three defensible answers
-claude_sessions.py active
+claude-sessions active
 
 # dry run: copy everything unarchived from work into the signed-in partition
-claude_sessions.py copy --from work
+claude-sessions copy --from work
 
 # just one session, then actually do it
-claude_sessions.py copy --from work -s 5651c527 --apply
+claude-sessions copy --from work -s 5651c527 --apply
 ```
 
 `copy` prints a direction diagram, the per-session plan, and the port fixes it
@@ -160,24 +272,24 @@ would apply, then stops. Nothing is written without `--apply`.
 
 ```bash
 # this machine, plus every WSL distro with a Claude Code install
-claude_sessions.py hosts
+claude-sessions hosts
 
 # what is in there. ORIGIN separates two things that share a directory:
 #   cli      you ran `claude` at a terminal inside the distro
 #   desktop  the Windows app started it, using the distro as its environment
-claude_sessions.py sessions -H wsl:Ubuntu
-claude_sessions.py sessions -H wsl:Ubuntu --cli -n 10
+claude-sessions sessions -H wsl:Ubuntu
+claude-sessions sessions -H wsl:Ubuntu --cli -n 10
 
 # make WSL CLI sessions visible in the app (dry run, then for real)
-claude_sessions.py adopt --from wsl:Ubuntu
-claude_sessions.py adopt --from wsl:Ubuntu -s 3f8137a7 --apply
+claude-sessions adopt --from wsl:Ubuntu
+claude-sessions adopt --from wsl:Ubuntu -s 3f8137a7 --apply
 
 # the other direction: hand a Windows session to the CLI inside WSL
-claude_sessions.py eject 8aef0655 --to wsl:Ubuntu --apply
+claude-sessions eject 8aef0655 --to wsl:Ubuntu --apply
 ```
 
 `adopt` writes **only metadata**. The transcript stays inside the distro and is
-never copied or rewritten — the app runs `claude` in WSL against the file that
+never copied or rewritten. The app runs `claude` in WSL against the file that
 is already there, so the terminal and the app are the *same* session rather
 than two forks of it. Three fields do the work:
 
@@ -188,36 +300,39 @@ than two forks of it. Three fields do the work:
 ```
 
 `eject` is the one command that **forks**. A Windows session's working directory
-has to be reachable from the distro — `C:\you\repo` is visible there as
-`/mnt/c/you/repo`, the same files over drvfs — so it writes a second transcript
+has to be reachable from the distro (`C:\you\repo` is visible there as
+`/mnt/c/you/repo`, the same files over drvfs), so it writes a second transcript
 with the `cwd` rewritten, and prints the `wsl … claude --resume` line. The
 Windows session keeps its own. Resume in one place or the other, never both.
 
 ### Let Claude drive it
 
 ```bash
-claude_sessions.py skill              # print the SKILL.md
-claude_sessions.py skill --install    # write it to ~/.claude/skills/
+claude-sessions skill              # print the SKILL.md
+claude-sessions skill --install    # write it to ~/.claude/skills/
 ```
 
 Installs a Claude Code skill that teaches Claude when this applies (sessions
 "missing" after an org switch), the storage model, the dry-run-first workflow,
-and the cache-reload caveat — so it stops guessing and stops reaching for
-`cp`. Restart Claude Code afterwards to pick it up.
+and the cache-reload caveat, so it stops guessing and stops reaching for `cp`.
+The skill records the command you ran it with, so install it from the copy you
+will keep (`uv tool install` or the downloaded file), not from a one-off `uvx`.
+Restart Claude Code afterwards to pick it up.
 
 ### "Active" is ambiguous, so `active` gives you all three
 
-1. **Signed in** — from `~/.claude.json`. Authoritative: the only partition the
+1. **Signed in**, from `~/.claude.json`. Authoritative: the only partition the
    app will show you.
-2. **Last active** — most recent session activity on disk.
-3. **Most quota** — parsed from `plan-usage-history.json`, which records
+2. **Last active**: most recent session activity on disk.
+3. **Most quota**, parsed from `plan-usage-history.json`, which records
    five-hour (`fh`) and seven-day (`sd`) usage percentages per org. Often the
    real reason you switched orgs in the first place.
 
 ## Safety
 
-Every rule below is stated formally in **[INVARIANTS.md](INVARIANTS.md)** and
-enforced by a named test in `tests/`. The invariant doc lists the test that
+Every rule below is stated formally in
+**[INVARIANTS.md](https://github.com/aviadr1/claude-session-teleporter/blob/main/INVARIANTS.md)**
+and enforced by a named test in `tests/`. The invariant doc lists the test that
 proves each one.
 
 `copy` is built so that a mistake cannot cost you a session:
@@ -229,14 +344,14 @@ proves each one.
 - **Never touches the source.** Copy only; the source partition is opened
   read-only.
 - **Never duplicates transcripts.** They are shared by design.
-- **Refuses sessions with no transcript on disk** — there would be nothing to
+- **Refuses sessions with no transcript on disk.** There would be nothing to
   continue.
 - **Refuses cross-account copies** unless you pass `--allow-cross-account`.
 - **Dry-run by default.**
 
 `adopt` inherits all of that, never writes into the distro, derives its desktop
 UUID from the WSL session id so re-running is idempotent, and resets
-`permissionMode` to `auto` — a session this tool created must not arrive
+`permissionMode` to `auto`: a session this tool created must not arrive
 pre-authorised to skip tool approval.
 
 `eject` is the exception, and says so loudly: it writes a second transcript.
@@ -250,7 +365,7 @@ org's connectors, and a disagreement is reported rather than silently resolved.
 ## Development
 
 [uv](https://docs.astral.sh/uv/) handles the dev environment. The tool itself
-still has no dependencies — `pytest` lives in a dependency-group, so it is never
+still has no dependencies. `pytest` lives in a dependency-group, so it is never
 installed for users.
 
 ```bash
@@ -261,15 +376,17 @@ uv run claude-sessions --help
 ```
 
 `tests/test_safety.py`, `tests/test_formats.py` and `tests/test_packaging.py`
-pin every invariant in [INVARIANTS.md](INVARIANTS.md) against fixtures.
+pin every invariant in
+[INVARIANTS.md](https://github.com/aviadr1/claude-session-teleporter/blob/main/INVARIANTS.md)
+against fixtures.
 
 `tests/test_format_drift.py` re-checks the reverse-engineered formats against
 whatever real Claude Code store is on the machine, and skips cleanly when there
-is none — so CI stays green on a bare runner while your own machine acts as the
+is none. CI stays green on a bare runner while your own machine acts as the
 canary. If Anthropic changes a format, that file fails first. It is not
 theoretical: it is how the connector-map bug in `copy` was found.
 
-The suite is checked by **mutation**, not coverage — deliberately break an
+The suite is checked by **mutation**, not coverage: deliberately break an
 invariant and a named test must go red. If you add one, break it first.
 
 ## Caveats
@@ -280,8 +397,9 @@ invariant and a named test must go red. If you add one, break it first.
   reachable.
 - The destination org needs its own native session before the connector map can
   be built. With none, MCP config is stripped and the app repopulates it.
-- `eject` only works for a working directory WSL can reach — a drive path. A UNC
-  path has no spelling inside the distro and is refused rather than guessed at.
+- `eject` only works for a working directory WSL can reach, meaning a drive
+  path. A UNC path has no spelling inside the distro and is refused rather than
+  guessed at.
 - A `/mnt/c` checkout is the same files as the Windows one, reached over drvfs:
   slower, with Windows line endings and file modes.
 - Reverse-engineered from on-disk formats, which Anthropic can change without
