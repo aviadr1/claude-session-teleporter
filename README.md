@@ -95,14 +95,16 @@ So the simplest install is still the best one — drop the file anywhere and run
 it:
 
 ```bash
+mkdir -p ~/.claude/tools
 curl -o ~/.claude/tools/claude_sessions.py \
   https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/claude_sessions.py
+python3 ~/.claude/tools/claude_sessions.py --help
 ```
 
 Or run it from the repository. The console script is `claude-sessions`:
 
 ```bash
-uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions partitions
+uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions --help
 uv tool install git+https://github.com/aviadr1/claude-session-teleporter   # then: claude-sessions --help
 ```
 
@@ -111,7 +113,7 @@ index:
 
 ```bash
 uv tool install claude-session-teleporter   # then: claude-sessions --help
-uvx --from claude-session-teleporter claude-sessions partitions
+uvx --from claude-session-teleporter claude-sessions --help
 ```
 
 Windows is the primary target (that is where the paths were verified). macOS and
