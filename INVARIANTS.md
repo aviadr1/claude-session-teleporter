@@ -240,7 +240,8 @@ for users.
 
 Users see `__version__`; a release publishes the `pyproject.toml` version. Drift
 means bug reports quoting a version that was never released. The publish
-workflow additionally refuses to run when the release tag disagrees with either.
+workflow, triggered by a `v*` tag, refuses to run when that tag disagrees
+with either.
 
 > `test_version_matches_the_module`, and the version-check step in
 > `python-publish.yml`

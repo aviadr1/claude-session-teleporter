@@ -99,12 +99,19 @@ curl -o ~/.claude/tools/claude_sessions.py \
   https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/claude_sessions.py
 ```
 
-Or, if you would rather have it on your PATH:
+Or run it from the repository. The console script is `claude-sessions`:
+
+```bash
+uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions partitions
+uv tool install git+https://github.com/aviadr1/claude-session-teleporter   # then: claude-sessions --help
+```
+
+After the first release is published to PyPI, the same commands work from the
+index:
 
 ```bash
 uv tool install claude-session-teleporter   # then: claude-sessions --help
-uvx claude-session-teleporter partitions    # or run it without installing
-pipx install claude-session-teleporter
+uvx --from claude-session-teleporter claude-sessions partitions
 ```
 
 Windows is the primary target (that is where the paths were verified). macOS and
