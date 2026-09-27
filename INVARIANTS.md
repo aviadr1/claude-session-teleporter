@@ -253,6 +253,17 @@ wheel must contain that module and nothing else.
 
 > `test_console_script_entry_point_resolves`, `test_wheel_ships_the_tool_and_nothing_else`
 
+### P5 - The installed skill's commands work from any directory
+
+`skill --install` writes the command Claude will run into `SKILL.md`, and Claude
+runs it from whatever project it is in. So the command must not depend on the
+current directory: a script is named by its absolute path (`python
+/home/you/.claude/tools/claude_sessions.py`), an installed console script by its
+name (`claude-sessions`, never `python claude-sessions`), and `allowed-tools`
+permits exactly that command.
+
+> `test_skill_commands_run_from_any_directory`, `test_skill_calls_the_console_script_by_name`
+
 ---
 
 ## Testing against drift

@@ -129,6 +129,58 @@ def test_console_script_entry_point_resolves():
     assert callable(getattr(cs, attr)), f"{module}:{attr} is not callable"
 
 
+def _skill_command(skill: str, subcommand: str) -> str:
+    """The command line the installed skill tells Claude to type for `subcommand`."""
+    line = next(ln for ln in skill.splitlines() if ln.split("#")[0].rstrip().endswith(f" {subcommand}"))
+    return line.split("#")[0].strip()
+
+
+def test_skill_commands_run_from_any_directory(tmp_path):
+    """
+    P5, curl install: the skill is installed once and then used from whatever
+    project Claude happens to be in. Run the tool by a relative path, as someone
+    does right after `curl -o`, and the command it writes into the skill must
+    still work from a different directory.
+    """
+    import shlex
+    import shutil
+    import subprocess
+
+    tools = tmp_path / "tools"
+    project = tmp_path / "some project"
+    tools.mkdir()
+    project.mkdir()
+    shutil.copy(TOOL, tools / "claude_sessions.py")
+
+    skill = subprocess.run(
+        [sys.executable, "claude_sessions.py", "skill"],
+        capture_output=True, text=True, encoding="utf-8", cwd=tools, check=True,
+    ).stdout
+    argv = shlex.split(_skill_command(skill, "partitions"))
+    assert argv[0] == "python", argv
+    # `python` may not be on PATH in CI; what matters is the script argument
+    out = subprocess.run(
+        [sys.executable, *argv[1:-1], "--version"], capture_output=True, text=True, cwd=project,
+    )
+    assert out.returncode == 0, f"skill command {argv} fails outside the tool's directory: {out.stderr}"
+    assert "Bash(python *)" in skill
+
+
+def test_skill_calls_the_console_script_by_name(monkeypatch, capsys, tmp_path):
+    """
+    P5, package install: `claude-sessions` is on PATH, so the skill calls it by
+    name - not `python claude-sessions`, which looks for a file of that name in
+    the current directory - and allows exactly that command.
+    """
+    for argv0 in ("claude-sessions", "claude-sessions.exe"):
+        monkeypatch.setattr(sys, "argv", [str(tmp_path / "bin" / argv0), "skill"])
+        assert cs.main(["skill"]) == 0
+        skill = capsys.readouterr().out
+        assert _skill_command(skill, "partitions") == "claude-sessions partitions"
+        assert "Bash(claude-sessions *)" in skill
+        assert "python claude-sessions" not in skill
+
+
 def test_wheel_ships_the_tool_and_nothing_else():
     """A single-module wheel: the tests and docs are not part of the install."""
     included = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"]

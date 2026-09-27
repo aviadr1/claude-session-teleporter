@@ -69,6 +69,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1698,7 +1699,7 @@ name: claude-session-teleporter
 description: Find and move Claude Code sessions between account/org partitions, and between WSL and the Windows desktop app. Use when the user says sessions are "missing", "gone", or "not showing up" after switching orgs or accounts, asks where Claude Code stores sessions, wants to continue a session from their other org, wants a session they started in WSL to show up in the Claude app on Windows (or the reverse), or hits a rate limit on one org and wants their work available in another.
 user-invocable: true
 allowed-tools:
-  - Bash(python *)
+  - Bash({allow} *)
   - Read
 ---
 
@@ -1753,31 +1754,31 @@ to keep going in the app rather than the terminal.
 Always dry run first. Every write command is dry run by default.
 
 ```bash
-python {tool} partitions              # orgs on this machine, quota left in each
-python {tool} hosts                   # this machine + WSL distros, with unadopted counts
+{run} partitions              # orgs on this machine, quota left in each
+{run} hosts                   # this machine + WSL distros, with unadopted counts
 ```
 
 Then, on the partition axis:
 
 ```bash
-python {tool} sessions -p <partition>       # what is over there
-python {tool} copy --from <partition>       # DRY RUN
-python {tool} copy --from <partition> --apply
+{run} sessions -p <partition>       # what is over there
+{run} copy --from <partition>       # DRY RUN
+{run} copy --from <partition> --apply
 ```
 
 Or on the host axis:
 
 ```bash
-python {tool} sessions -H wsl:Ubuntu        # CLI sessions inside the distro
-python {tool} adopt --from wsl:Ubuntu       # DRY RUN
-python {tool} adopt --from wsl:Ubuntu -s <id> --apply    # one first
-python {tool} eject <id> --to wsl:Ubuntu    # the other direction, DRY RUN
+{run} sessions -H wsl:Ubuntu        # CLI sessions inside the distro
+{run} adopt --from wsl:Ubuntu       # DRY RUN
+{run} adopt --from wsl:Ubuntu -s <id> --apply    # one first
+{run} eject <id> --to wsl:Ubuntu    # the other direction, DRY RUN
 ```
 
 Selectors - partition: a label, an org-uuid prefix, or `active` / `last-active` /
 `most-quota`. Host: `wsl`, `wsl:<distro>`, `windows`. Session `-s`: an id prefix
 or title substring, repeatable. Label a partition once so the user stops reading
-UUIDs: `python {tool} label 3c426532 work`.
+UUIDs: `{run} label 3c426532 work`.
 
 Do one session first to prove the round trip before doing all of them.
 
@@ -1830,8 +1831,8 @@ environment. Do not conflate them - the user cares about the difference. The
 `claude-desktop`, shown as the ORIGIN column.
 
 ```bash
-python {tool} sessions -H wsl:Ubuntu --cli -n 10     # real CLI sessions only
-python {tool} sessions -H wsl:Ubuntu --desktop       # app sessions running in WSL
+{run} sessions -H wsl:Ubuntu --cli -n 10     # real CLI sessions only
+{run} sessions -H wsl:Ubuntu --desktop       # app sessions running in WSL
 ```
 
 Only `cli` sessions are candidates for `adopt`; the app-started ones already
@@ -2022,9 +2023,27 @@ def cmd_guide(args) -> int:
     return 0
 
 
+def skill_invocation() -> str:
+    """
+    The command the skill tells Claude to run. Claude runs it from whatever
+    project it is in, so it cannot depend on the current directory: a script is
+    named by its absolute path, and an installed console script, which is on
+    PATH, by its name alone.
+    """
+    argv0 = Path(sys.argv[0])
+    if argv0.suffix == ".py":
+        return f"python {shlex.quote(argv0.resolve().as_posix())}"
+    return argv0.stem or "claude-sessions"
+
+
 def cmd_skill(args) -> int:
     tool = Path(sys.argv[0]).name or "claude_sessions.py"
-    body = SKILL_MD.replace("{tool}", tool)
+    run = skill_invocation()
+    body = (
+        SKILL_MD.replace("{run}", run)
+        .replace("{allow}", run.split()[0])
+        .replace("{tool}", tool)
+    )
     if not args.install:
         print(body, end="")
         return 0
