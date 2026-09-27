@@ -1,6 +1,7 @@
 # Claude Session Teleporter
 
 [![tests](https://github.com/aviadr1/claude-session-teleporter/actions/workflows/tests.yml/badge.svg)](https://github.com/aviadr1/claude-session-teleporter/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/claude-session-teleporter.svg)](https://pypi.org/project/claude-session-teleporter/)
 [![license: MIT](https://img.shields.io/github/license/aviadr1/claude-session-teleporter)](https://github.com/aviadr1/claude-session-teleporter/blob/main/LICENSE)
 [![python: 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/aviadr1/claude-session-teleporter/blob/main/pyproject.toml)
 [![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)](https://github.com/aviadr1/claude-session-teleporter/blob/main/INVARIANTS.md#packaging)
@@ -22,10 +23,10 @@ With [uv](https://docs.astral.sh/uv/):
 
 ```bash
 # every org on this machine, its sessions, and how much quota it has left (read-only)
-uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions partitions
+uvx --from claude-session-teleporter claude-sessions partitions
 
 # install it, then copy the other org's sessions into the one you are signed into
-uv tool install git+https://github.com/aviadr1/claude-session-teleporter
+uv tool install claude-session-teleporter
 claude-sessions copy            # dry run: prints the plan, writes nothing
 claude-sessions copy --apply    # do it
 ```
@@ -193,15 +194,18 @@ nothing installed.
 **With uv** (puts `claude-sessions` on your PATH):
 
 ```bash
-uv tool install git+https://github.com/aviadr1/claude-session-teleporter
+uv tool install claude-session-teleporter     # or: pip install claude-session-teleporter
 claude-sessions --help
 ```
 
 Or run it once without installing:
 
 ```bash
-uvx --from git+https://github.com/aviadr1/claude-session-teleporter claude-sessions --help
+uvx --from claude-session-teleporter claude-sessions --help
 ```
+
+For the latest `main`, install from GitHub instead:
+`uv tool install git+https://github.com/aviadr1/claude-session-teleporter`.
 
 **As a single file.** In bash (WSL, macOS, Linux, Git Bash):
 
@@ -221,9 +225,9 @@ curl.exe -o "$HOME\.claude\tools\claude_sessions.py" `
 python "$HOME\.claude\tools\claude_sessions.py" --help
 ```
 
-**PyPI:** not published yet, so install from GitHub as above. Once it is,
-`uv tool install claude-session-teleporter` will work. Do not install
-`claude-sessions` from PyPI: that name belongs to an unrelated project.
+**The PyPI package is `claude-session-teleporter`**, and the command it installs
+is `claude-sessions`. Do not install `claude-sessions` from PyPI: that name
+belongs to an unrelated project.
 
 Windows is the primary target (that is where the paths were verified). macOS and
 Linux paths are implemented but untested. Set `CLAUDE_SESSIONS_ROOT` to
