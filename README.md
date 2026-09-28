@@ -550,6 +550,14 @@ invariant and a named test must go red. If you add one, break it first.
 > &nbsp;&nbsp;&nbsp;&nbsp;So teleport, and let the app restart —
 > &nbsp;&nbsp;&nbsp;&nbsp;oh, you _can_ take it with you. Every part.
 
+## Releases
+
+See the [changelog](https://github.com/aviadr1/claude-session-teleporter/blob/main/CHANGELOG.md)
+for release notes and compatibility changes. Merging a PR does not publish to
+PyPI. Maintainers update the version in `pyproject.toml` and `claude_sessions.py`,
+refresh `uv.lock`, and add a changelog entry before pushing a matching `vX.Y.Z`
+tag. The tag workflow tests, builds, and publishes through PyPI trusted publishing.
+
 ## License
 
 MIT
