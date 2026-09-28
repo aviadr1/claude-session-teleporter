@@ -59,3 +59,15 @@ Final interruption correction `57458ed`: Linux 143 passed, Python 3.10 and nativ
 - [x] Negative controls preserve quoted wrappers, ordinary headings, unknown/malformed wrappers, and native Claude text.
 - [x] Installed Claude loader sends a clean user prompt to the loopback Messages endpoint.
 - [x] Linux: 151 passed, 2 skipped with real-client probes; Python 3.10 and native Windows: 146 passed, 7 skipped each. The seven independent live-store drift checks remain excluded as previously documented.
+
+## Destination project preservation (T8)
+
+- [x] Public CLI dry run does not launch Codex or create destination state.
+- [x] Exact/secondary roots, explicit IDs, duplicate names and ambiguous roots.
+- [x] Real app-server import creates/reuses one project and remains discoverable
+  in provider-filtered DB-only lists after restart (default and custom provider).
+- [x] A different target home does not inherit the caller's SQLite override.
+- [x] Repair and repeated import preserve conversation; conflicting existing
+  membership is refused; archive and foreign-home inputs are rejected.
+- [x] Inject a failed native metadata endpoint after publication, retain the
+  transcript, then repair through the public CLI without duplicate projects.

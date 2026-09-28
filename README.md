@@ -63,6 +63,9 @@ claude-sessions sessions --agent codex -n 10
 claude-sessions teleport /path/to/claude-session.jsonl --to codex
 claude-sessions teleport /path/to/claude-session.jsonl --to codex --apply
 
+# Claude -> Codex desktop, preserving project placement
+claude-sessions teleport /path/to/claude-session.jsonl --to codex --codex-project auto --apply
+
 # Codex -> Claude CLI
 claude-sessions teleport /path/to/rollout.jsonl --to claude --apply
 
@@ -85,6 +88,36 @@ store use `sessions --agent codex --home DIR` (`--all` includes archived Codex
 rollouts). Windows and WSL stores are separate. When their path spellings
 differ, supply `--cwd` in the destination's syntax; the working tree must
 already exist. The tool does not move files or rewrite paths inside messages.
+
+For Codex desktop **project membership**, add `--codex-project auto`. The tool
+reuses a project with an exact working-directory root or creates one for that
+folder. It never guesses from a parent folder; multiple exact matches require
+`--codex-project ID` (or a unique project name). This uses Codex's native project
+APIs and registers the destination provider without sending a model prompt.
+A recent Codex executable with project APIs is required; use `--codex-bin PATH`
+for the desktop-bundled executable if your CLI is older. Without this option,
+imports remain independent of the Codex executable and preserve the cwd only.
+
+To assign an already imported session without reimporting its conversation:
+
+```bash
+claude-sessions codex-project /path/to/.codex/sessions/.../rollout.jsonl --apply
+```
+
+Both commands support `--target-home`, `--codex-bin`, and
+`--codex-sqlite-home DIR` for desktops whose `CODEX_SQLITE_HOME` differs from
+`CODEX_HOME`. Use the destination host's paths and binary: on Windows/WSL,
+the desktop may use `/mnt/c/Users/NAME/.codex` for sessions and a separate WSL
+index. These paths vary by machine. A different `--target-home`
+does not inherit the current host's database override.
+
+Dry runs never start Codex or resolve/create projects. On apply, project lookup
+happens before transcript publication. If later registration fails, the error
+identifies the retained transcript; `codex-project` repairs placement without
+replacing it. Existing assignments are preserved; archived sessions are refused.
+The sidebar may still need an app reload to show backend changes. Project
+membership is destination-local: foreign project IDs and project settings are
+not copied, and round trips resolve the destination folder again.
 
 **What transfers:** active user/assistant text and completed native tool calls
 and results, including their IDs, names, arguments, output and order. Claude

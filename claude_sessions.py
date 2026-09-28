@@ -46,6 +46,7 @@ Commands:
   adopt        surface WSL CLI sessions in the desktop app (dry-run by default)
   eject        put a desktop session's transcript where the WSL CLI finds it
   teleport     fork conversation history between Claude and Codex
+  codex-project assign an imported Codex session to a desktop project
   label        give a partition a human-readable name
   guide        print a start-to-finish walkthrough
   skill        print or install a Claude Code skill for this tool
@@ -70,12 +71,14 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import subprocess
 import sys
 import time
 import tempfile
+import threading
 import uuid as _uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -1801,6 +1804,12 @@ Then `{run} teleport /path/to/transcript.jsonl --to codex` (or `--to claude`).
 Dry-run first; `--apply` creates an independent fork. For Claude desktop include
 `--desktop-partition active` on the initial import. For another store use
 `--target-home`; for another working directory use `--cwd`.
+For Codex desktop include `--codex-project auto`: reuse an exact destination
+project root or create one. Ambiguous matches require `--codex-project ID`.
+Use the desktop host's session home, optional `--codex-sqlite-home`, and a recent
+`--codex-bin` with project APIs. An existing active import can be assigned with
+`{run} codex-project /path/to/rollout.jsonl --apply`; this does not reimport history.
+Dry runs never start Codex. Plain imports preserve cwd but not project membership.
 
 Inspect the conversion notices: completed tools retain native call/result
 structure; pending or ambiguous exchanges are rejected. Both round trips retain
@@ -2864,8 +2873,168 @@ def _publish_teleport(files: list[tuple[Path, str]], tombstone: Path | None) -> 
             temporary.unlink(missing_ok=True)
 
 
+def codex_project_environment(home: Path, sqlite_home: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    # T8: an explicit destination must not inherit another host's database.
+    current = native_path(Path(env.get('CODEX_HOME', Path.home()/'.codex')).resolve())
+    if current != native_path(home.resolve()):
+        env.pop('CODEX_SQLITE_HOME', None)
+    env['CODEX_HOME'] = str(home)
+    if sqlite_home:
+        env['CODEX_SQLITE_HOME'] = str(Path(sqlite_home).expanduser().resolve())
+    return env
+
+
+class CodexProjectClient:
+    """Short-lived local JSON-RPC client; never starts a model turn."""
+
+    def __init__(self, home: Path, binary: str, sqlite_home: str | None = None):
+        env = codex_project_environment(home, sqlite_home)
+        self.process = subprocess.Popen([binary, 'app-server'], env=env, stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        text=True, encoding='utf-8')
+        self.output = queue.Queue()
+        self.sequence = 0
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                value = json.loads(line)
+                if 'id' in value and ('result' in value or 'error' in value):
+                    self.output.put(value)
+        except (ValueError, OSError):
+            pass  # rpc reports the closed/invalid stream; never print protocol data.
+        finally:
+            self.output.put(None)
+
+    def __enter__(self):
+        try:
+            self.rpc('initialize', {'clientInfo': {'name': 'claude_session_teleporter', 'version': __version__},
+                                    'capabilities': {'experimentalApi': True}})
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, *unused):
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+        self.reader.join(timeout=5)
+        self.process.stdin.close()
+        self.process.stdout.close()
+
+    def rpc(self, method: str, params: dict) -> dict:
+        self.sequence += 1
+        self.process.stdin.write(json.dumps(dict(id=self.sequence, method=method, params=params))+'\n')
+        self.process.stdin.flush()
+        try:
+            result = self.output.get(timeout=30)
+        except queue.Empty:
+            raise ValueError(f'Codex {method} timed out') from None
+        if result is None:
+            raise ValueError(f'Codex exited during {method}; check --codex-bin and destination configuration')
+        if result.get('id') != self.sequence or 'error' in result:
+            raise ValueError(f'Codex {method} failed: {result.get("error", "unexpected response")}. '
+                             'Project placement requires a Codex app server with project APIs.')
+        return result['result']
+
+    def projects(self) -> list[dict]:
+        projects, cursor, seen = [], None, set()
+        while True:
+            response = self.rpc('project/list', {'limit': 100, 'cursor': cursor})
+            projects.extend(response['data'])
+            cursor = response.get('nextCursor')
+            if not cursor:
+                return projects
+            if cursor in seen:
+                raise ValueError('Codex returned a repeated project-list cursor')
+            seen.add(cursor)
+
+
+def select_codex_project(projects: list[dict], cwd: str, selector: str) -> dict | None:
+    """T8: match exact roots, never guess from overlapping ancestor folders."""
+    if selector == 'auto':
+        root = native_path(Path(cwd).resolve())
+        matches = [p for p in projects if any(native_path(Path(r['path']).resolve()) == root for r in p['roots'])]
+    else:
+        matches = [p for p in projects if p['id'] == selector]
+        if not matches:
+            matches = [p for p in projects if p['name'] == selector]
+        if not matches:
+            raise ValueError(f'Codex project not found: {selector}')
+    if len(matches) > 1:
+        raise ValueError('ambiguous Codex project; choose an ID with --codex-project: ' +
+                         ', '.join(f'{p["name"]} ({p["id"]})' for p in matches))
+    return matches[0] if matches else None
+
+
+def assign_codex_project(client: CodexProjectClient, sid: str, cwd: str,
+                         project: dict | None, *, register: bool = False) -> dict:
+    # Native resume registers the destination provider for DB-only desktop lists.
+    # No turn/start, source configuration, or historical tool execution occurs.
+    thread = client.rpc('thread/read', {'threadId': sid})['thread']
+    if thread.get('cwd') != cwd:
+        raise ValueError('Codex thread cwd differs from the import; project assignment refused')
+    if register or not thread.get('modelProvider'):
+        config = client.rpc('config/read', {'cwd': cwd, 'includeLayers': False})['config']
+        thread = client.rpc('thread/resume', {'threadId': sid,
+                            'modelProvider': config.get('model_provider') or 'openai'})['thread']
+    if thread.get('cwd') != cwd:
+        raise ValueError('Codex thread cwd differs from the import; project assignment refused')
+    if thread.get('projectId'):
+        if project is not None and thread['projectId'] != project['id']:
+            raise ValueError('thread already belongs to another Codex project; left unchanged')
+        project = client.rpc('project/read', {'projectId': thread['projectId']})['project']
+        print(f'Codex project already assigned: {project["name"]} ({project["id"]})')
+        return project
+    if project is None:
+        project = client.rpc('project/create', {
+            'idempotencyKey': 'claude-session-teleporter:' + str(_uuid.uuid5(TELEPORT_NS, str(Path(cwd).resolve()))),
+            'name': Path(cwd).name or cwd, 'roots': [{'path': cwd}],
+        })['project']
+    client.rpc('thread/metadata/update', {'threadId': sid, 'projectId': project['id']})
+    verified = client.rpc('thread/read', {'threadId': sid})['thread']
+    if verified.get('projectId') != project['id']:
+        raise ValueError('Codex did not retain the requested project assignment')
+    print(f'Codex project: {project["name"]} ({project["id"]})')
+    return project
+
+
+def cmd_codex_project(args) -> int:
+    """Repair placement independently of the no-overwrite transcript importer."""
+    try:
+        home = native_path(Path(args.target_home).expanduser().resolve() if args.target_home else agent_home('codex').resolve())
+        path = native_path(Path(args.transcript).expanduser().resolve())
+        # T8: never address a same-ID session in a different destination store.
+        if home/'sessions' not in path.parents:
+            raise ValueError('rollout must be inside the destination CODEX_HOME/sessions')
+        with path.open(encoding='utf-8') as stream:
+            header = json.loads(stream.readline())
+        if header.get('type') != 'session_meta':
+            raise ValueError('expected a Codex rollout')
+        sid, cwd = header['payload']['id'], header['payload']['cwd']
+        print(f'Assign Codex session {sid} ({cwd}) to project: {args.codex_project}')
+        if not args.apply:
+            print('DRY RUN. Project resolution is deferred; no app server started and nothing written.')
+            return 0
+        with CodexProjectClient(home, args.codex_bin, args.codex_sqlite_home) as client:
+            project = select_codex_project(client.projects(), cwd, args.codex_project)
+            assign_codex_project(client, sid, cwd, project)
+        return 0
+    except (OSError, ValueError, KeyError) as exc:
+        die(str(exc))
+
+
 def cmd_teleport(args) -> int:
     try:
+        if args.to != 'codex' and (args.codex_project or args.codex_sqlite_home or args.codex_bin != 'codex'):
+            raise ValueError('Codex project options require --to codex')
         source = Path(args.transcript).expanduser()
         session = read_portable_session(source)
         if session.agent == args.to:
@@ -2934,15 +3103,29 @@ def cmd_teleport(args) -> int:
                                  'existing files were preserved. Inspect the destination before retrying')
             print('Destination already exists; left untouched (including archived imports).')
             return 0
+        if args.codex_project:
+            print(f'Codex project: {args.codex_project} (resolve on apply; auto reuses an exact root or creates a project)')
         if not args.apply:
             print('DRY RUN. Nothing written. Re-run with --apply to create this fork.')
             return 0
-        _publish_teleport(files, tombstone)
+        if args.codex_project:
+            with CodexProjectClient(home, args.codex_bin, args.codex_sqlite_home) as client:
+                project = select_codex_project(client.projects(), cwd, args.codex_project)
+                _publish_teleport(files, tombstone)
+                try:
+                    assign_codex_project(client, sid, cwd, project, register=True)
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f'Imported transcript retained at {target}, but project placement failed: {exc}. '
+                                     'Repair with codex-project ROLLOUT using the same destination options and --apply') from exc
+        else:
+            _publish_teleport(files, tombstone)
         print(f'Created {sid}. Resume in the target environment:')
         print(f'  codex resume {sid}' if args.to == 'codex' else f'  claude --resume {sid}')
         print(f'Run from {cwd}; use the destination {env_key}={home}.')
         if args.to == 'codex':
-            print('Desktop: use the same CODEX_HOME and host, then refresh/restart the app to discover the session.')
+            print('Desktop: use the same CODEX_HOME and host. ' +
+                  ('Project assignment verified; reopen the app if the sidebar is stale.' if args.codex_project else
+                   'Use --codex-project auto on import, or codex-project to assign this existing session.'))
         elif args.desktop_partition:
             print('Desktop: switch accounts or restart Claude to reload its session list.')
         else:
@@ -3071,7 +3254,7 @@ def main(argv: list[str] | None = None) -> int:
     tp = sub.add_parser(
         "teleport", help="fork conversation history between Claude and Codex",
         description="Convert a Claude transcript or Codex rollout into a new resumable session. "
-        "Dry run by default. Tool evidence becomes text; permissions and credentials never transfer.",
+        "Dry run by default. Tools retain native structure; permissions and credentials never transfer.",
     )
     tp.add_argument("transcript", help="source Claude JSONL transcript or Codex rollout file")
     tp.add_argument("--to", required=True, choices=("claude", "codex"))
@@ -3081,6 +3264,19 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--desktop-partition", metavar="SEL", help="also create Claude desktop metadata, e.g. active")
     tp.add_argument("--apply", action="store_true", help="actually create the fork (default is dry run)")
     tp.set_defaults(fn=cmd_teleport)
+
+    cp = sub.add_parser('codex-project', help='assign an existing Codex rollout to a desktop project')
+    cp.add_argument('transcript', help='existing rollout inside the destination CODEX_HOME/sessions')
+    cp.add_argument('--target-home', metavar='DIR', help='destination CODEX_HOME')
+    cp.add_argument('--apply', action='store_true', help='assign the project (default is dry run)')
+    cp.set_defaults(fn=cmd_codex_project)
+    for parser in (tp, cp):
+        parser.add_argument('--codex-project', metavar='auto|ID|NAME', default='auto' if parser is cp else None,
+                            help='assign a Codex desktop project; auto reuses an exact folder match or creates one')
+        parser.add_argument('--codex-bin', default='codex', metavar='PATH',
+                            help='Codex executable with project APIs (use the desktop-bundled version if needed)')
+        parser.add_argument('--codex-sqlite-home', metavar='DIR',
+                            help='destination CODEX_SQLITE_HOME when the desktop uses a separate index')
 
     lp = sub.add_parser(
         "label",

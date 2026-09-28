@@ -387,3 +387,22 @@ metadata restoration still verifies agreement with the native projection.
 > `tests/test_prompt_context.py` covers repeated round trips and negative controls.
 > `test_real_claude_resume_model_context` verifies the installed Claude loader sends
 > the clean prompt to the loopback model endpoint.
+
+
+### T8 — Codex desktop project placement uses destination-owned membership
+
+`--codex-project auto` and `codex-project` use native project APIs. Selection
+matches exact roots (including secondary roots), never ambiguous parents;
+duplicate matches require an explicit ID. An unmatched folder gets a project
+with a deterministic creation key. An assigned chat cannot be moved implicitly.
+`CodexProjectClient` isolates a different target home from the caller's SQLite
+override; `assign_codex_project` verifies cwd and persisted membership.
+Dry runs never launch a server. Publication stays exclusive; a subsequent API
+failure retains the transcript and reports the repair command. Repair never
+reimports conversation, and refuses files outside active destination sessions.
+Registration uses the destination provider and never sends a model turn.
+
+> `tests/test_codex_projects.py`; opt-in
+> `test_real_codex_project_import_and_repair` and
+> `test_real_codex_project_ambiguity_and_recovery` test persisted membership,
+> provider-filtered discovery, create/reuse, ambiguity, repair and restart.
