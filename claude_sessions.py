@@ -111,7 +111,7 @@ LEDGER_PATH = Path.home() / ".claude" / "session-copy-ledger.json"
 VOLATILE_FIELDS = ("sshRemoteProcessId",)
 ERROR_FIELDS = ("error", "errorAt", "errorCategory")
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 SKILL_DIR = Path.home() / ".claude" / "skills" / "claude-session-teleporter"
 
 # distros that ship with Docker Desktop and never host a Claude Code install

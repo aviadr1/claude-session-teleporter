@@ -1,6 +1,6 @@
 [project]
 name = "claude-session-teleporter"
-version = "1.1.0"                      # kept in step with __version__ by test_packaging.py
+version = "1.2.0"                      # kept in step with __version__ by test_packaging.py
 description = "Teleport sessions between Claude and Codex, across Claude accounts, and between WSL and Windows"
 readme = "README.md"
 license = "MIT"
@@ -45,7 +45,7 @@ build-backend = "hatchling.build"
 only-include = ["claude_sessions.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["claude_sessions.py", "README.md", "INVARIANTS.md", "LICENSE", "tests", "docs/demo_fixture.py"]
+include = ["claude_sessions.py", "README.md", "CHANGELOG.md", "INVARIANTS.md", "LICENSE", "tests", "docs/demo_fixture.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
