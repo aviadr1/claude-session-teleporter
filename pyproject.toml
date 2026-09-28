@@ -45,7 +45,9 @@ build-backend = "hatchling.build"
 only-include = ["claude_sessions.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["claude_sessions.py", "README.md", "INVARIANTS.md", "LICENSE", "tests"]
+# anchored with a leading "/": unanchored names match at any depth, and
+# demo/video/README.md must not ride along
+include = ["/claude_sessions.py", "/README.md", "/INVARIANTS.md", "/LICENSE", "/tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

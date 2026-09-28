@@ -6,6 +6,8 @@
 [![python: 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/aviadr1/claude-session-teleporter/blob/main/pyproject.toml)
 [![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)](https://github.com/aviadr1/claude-session-teleporter/blob/main/INVARIANTS.md#packaging)
 
+**[Watch the 29-second demo video (MP4)](https://github.com/aviadr1/claude-session-teleporter/blob/main/docs/teleporter-demo.mp4)**
+
 > **Oh, you _can_ take it with you.**
 > Out of quota, not out of context.
 
