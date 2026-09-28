@@ -1,0 +1,9 @@
+personal  (762f7f2a-1cab-4c8a-98d1-d53bf5e8872c)  ● signed in
+─────────────────────────────────────────────────────────────
+FLG  ID        LAST ACTIVITY     TITLE                     BRANCH/DIR  WSL
+───  ────────  ────────────────  ────────────────────────  ──────────  ───
+     5651c527  2026-09-28 10:57  Fix flaky auth test       api
+     b16b00b5  2026-09-28 08:57  Blog post draft           blog
+     7c0ffee0  2026-09-28 06:57  Migrate billing webhooks  api
+(3 unarchived of 3)   flags: A=archived  !=transcript missing  R=ssh/remote  W=runs in WSL
+

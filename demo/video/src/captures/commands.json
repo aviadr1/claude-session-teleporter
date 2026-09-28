@@ -1,0 +1,8 @@
+{
+  "00-label": "claude-sessions label 3c426532 work",
+  "01-partitions": "claude-sessions partitions",
+  "02-copy-dry-run": "claude-sessions copy --from work",
+  "03-copy-apply": "claude-sessions copy --from work --apply",
+  "04-partitions-after": "claude-sessions partitions",
+  "05-sessions-personal": "claude-sessions sessions -p personal"
+}

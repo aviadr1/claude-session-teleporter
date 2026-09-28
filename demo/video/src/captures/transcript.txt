@@ -1,0 +1,102 @@
+$ claude-sessions label 3c426532 work
+✓ 3c426532-1eaa-4e6f-93c1-4d30abca7b89 labelled 'work'  (C:\Users\aviad\cst-scratch\video-capture\.claude\partition-labels.json)
+$ claude-sessions partitions
+session store: C:\Users\aviad\cst-scratch\video-capture\AppData\Roaming\Claude\claude-code-sessions
+transcripts:   C:\Users\aviad\cst-scratch\video-capture\.claude\projects
+
+PARTITION   ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
+──────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ───────────────────────
+  work      3c426532-1eaa-4e6f-93c1-4d30abca7b89  1eb44d48    3       2    0  2026-09-28 10:57  ░░░░░░░░░░░░ 2%   Datadog, Linear, Sentry
+● personal  762f7f2a-1cab-4c8a-98d1-d53bf5e8872c  1eb44d48    1       1    0  2026-09-28 09:57  ███████████░ 88%  Linear, Sentry
+$ claude-sessions copy --from work
+
+┌────────────────────────────────────┐            ┌────────────────────────────────────┐
+│ SOURCE                             │            │ TARGET   ● signed in               │
+│ ────────────────────────────────── │            │ ────────────────────────────────── │
+│ work                               │            │ personal                           │
+│ org  3c426532-1eaa-4e6f-93c1-4d30… │            │ org  762f7f2a-1cab-4c8a-98d1-d53b… │
+│ acct 1eb44d48…                     │            │ acct 1eb44d48…                     │
+│                                    │ ═══ 2 ═══▶ │                                    │
+│ 3 sessions · 2 unarchived          │            │ 1 sessions · 1 unarchived          │
+│ last active 2026-09-28 10:57       │            │ last active 2026-09-28 09:57       │
+│ connectors  Datadog, Linear, Sent… │            │ connectors  Linear, Sentry         │
+│                                    │            │                                    │
+│ quota left ░░░░░░░░░░░░░░░░ 2%     │            │ quota left ██████████████░░ 88%    │
+└────────────────────────────────────┘            └────────────────────────────────────┘
+
+   ACTION          ID        LAST ACTIVITY     TITLE                     BRANCH/DIR  FIX
+─  ──────────────  ────────  ────────────────  ────────────────────────  ──────────  ───
+✓  COPY            5651c527  2026-09-28 10:57  Fix flaky auth test       api         7
+✓  COPY            7c0ffee0  2026-09-28 06:57  Migrate billing webhooks  api         6
+✗  skip: archived  0ddba11a  2026-09-24 17:57  Old spike                 api
+
+port fixes applied (FIX column counts these per session):
+   2x  remapped Linear tool keys: 01812872 ▶ 4b57c823
+   2x  remapped Sentry tool keys: e5c4f439 ▶ be036bca
+   2x  dropped stale tool keys for Datadog (9d1a0b7e)
+   2x  remapped Linear: 01812872 ▶ 4b57c823
+   2x  remapped Sentry: e5c4f439 ▶ be036bca
+   2x  dropped Datadog (9d1a0b7e) - not present in personal
+   1x  cleared previous crash state
+
+2 COPY   1 skip: archived
+transcripts are shared on disk - none are copied or duplicated.
+
+DRY RUN. Nothing written. Re-run with --apply to copy 2 session(s).
+$ claude-sessions copy --from work --apply
+
+┌────────────────────────────────────┐            ┌────────────────────────────────────┐
+│ SOURCE                             │            │ TARGET   ● signed in               │
+│ ────────────────────────────────── │            │ ────────────────────────────────── │
+│ work                               │            │ personal                           │
+│ org  3c426532-1eaa-4e6f-93c1-4d30… │            │ org  762f7f2a-1cab-4c8a-98d1-d53b… │
+│ acct 1eb44d48…                     │            │ acct 1eb44d48…                     │
+│                                    │ ═══ 2 ═══▶ │                                    │
+│ 3 sessions · 2 unarchived          │            │ 1 sessions · 1 unarchived          │
+│ last active 2026-09-28 10:57       │            │ last active 2026-09-28 09:57       │
+│ connectors  Datadog, Linear, Sent… │            │ connectors  Linear, Sentry         │
+│                                    │            │                                    │
+│ quota left ░░░░░░░░░░░░░░░░ 2%     │            │ quota left ██████████████░░ 88%    │
+└────────────────────────────────────┘            └────────────────────────────────────┘
+
+   ACTION          ID        LAST ACTIVITY     TITLE                     BRANCH/DIR  FIX
+─  ──────────────  ────────  ────────────────  ────────────────────────  ──────────  ───
+✓  COPY            5651c527  2026-09-28 10:57  Fix flaky auth test       api         7
+✓  COPY            7c0ffee0  2026-09-28 06:57  Migrate billing webhooks  api         6
+✗  skip: archived  0ddba11a  2026-09-24 17:57  Old spike                 api
+
+port fixes applied (FIX column counts these per session):
+   2x  remapped Linear tool keys: 01812872 ▶ 4b57c823
+   2x  remapped Sentry tool keys: e5c4f439 ▶ be036bca
+   2x  dropped stale tool keys for Datadog (9d1a0b7e)
+   2x  remapped Linear: 01812872 ▶ 4b57c823
+   2x  remapped Sentry: e5c4f439 ▶ be036bca
+   2x  dropped Datadog (9d1a0b7e) - not present in personal
+   1x  cleared previous crash state
+
+2 COPY   1 skip: archived
+transcripts are shared on disk - none are copied or duplicated.
+✓ 5651c527  Fix flaky auth test
+✓ 7c0ffee0  Migrate billing webhooks
+
+Copied 2 session(s) into personal (762f7f2a-1cab-4c8a-98d1-d53bf5e8872c).
+The app caches its session list in memory. Switch accounts in the app to
+force a reload - faster than restarting it, and it works just as well.
+$ claude-sessions partitions
+session store: C:\Users\aviad\cst-scratch\video-capture\AppData\Roaming\Claude\claude-code-sessions
+transcripts:   C:\Users\aviad\cst-scratch\video-capture\.claude\projects
+
+PARTITION   ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
+──────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ───────────────────────
+  work      3c426532-1eaa-4e6f-93c1-4d30abca7b89  1eb44d48    3       2    0  2026-09-28 10:57  ░░░░░░░░░░░░ 2%   Datadog, Linear, Sentry
+● personal  762f7f2a-1cab-4c8a-98d1-d53bf5e8872c  1eb44d48    3       3    0  2026-09-28 10:57  ███████████░ 88%  Linear, Sentry
+$ claude-sessions sessions -p personal
+personal  (762f7f2a-1cab-4c8a-98d1-d53bf5e8872c)  ● signed in
+─────────────────────────────────────────────────────────────
+FLG  ID        LAST ACTIVITY     TITLE                     BRANCH/DIR  WSL
+───  ────────  ────────────────  ────────────────────────  ──────────  ───
+     5651c527  2026-09-28 10:57  Fix flaky auth test       api
+     b16b00b5  2026-09-28 08:57  Blog post draft           blog
+     7c0ffee0  2026-09-28 06:57  Migrate billing webhooks  api
+(3 unarchived of 3)   flags: A=archived  !=transcript missing  R=ssh/remote  W=runs in WSL
+
