@@ -21,6 +21,10 @@ the org you were using has run out of quota.
 
 <sub>Real output against a demo store built by [`docs/demo_fixture.py`](https://github.com/aviadr1/claude-session-teleporter/blob/main/docs/demo_fixture.py), not your sessions. Re-record with `vhs docs/demo.tape`.</sub>
 
+**The 30-second tour** (with sound):
+
+https://github.com/user-attachments/assets/488d10d2-d116-4938-976c-ad175e78a814
+
 ## Quick start
 
 With [uv](https://docs.astral.sh/uv/):
