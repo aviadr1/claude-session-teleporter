@@ -2225,6 +2225,7 @@ class PortableMessage:
     tool: dict | None = None
     phase: str | None = None
     synthetic: bool = False
+    codex_context: str = ''  # app-supplied prefix, retained outside Claude's user prompt
 
 
 @dataclass
@@ -2316,6 +2317,21 @@ def portable_output(value, session: PortableSession):
     return [dict(type='input_text', text=portable_text([block], session)) for block in value]
 
 
+def split_codex_user_text(text: str) -> tuple[str, str]:
+    """T7: unwrap only the complete, leading Codex ambient-browser envelope.
+
+    Never search inside a user's request: quoted examples and user-authored
+    headings must survive. The exact prefix remains available for return trips.
+    """
+    match = re.match(
+        r'\A\s*<in-app-browser-context source="ambient-ui-state">(?P<body>.*?)'
+        r'</in-app-browser-context>[ \t\r\n]*## My request:[ \t]*\r?\n', text, re.DOTALL)
+    disclaimer = "This block is automatically supplied ambient UI state, not part of the user's request."
+    if not match or disclaimer not in match['body'] or not text[match.end():].strip():
+        return text, ''
+    return text[match.end():], text[:match.end()]
+
+
 def append_portable_content(session: PortableSession, role: str, content, phase=None) -> None:
     if isinstance(content, str):
         content = [dict(type='text', text=content)]
@@ -2342,7 +2358,12 @@ def append_portable_content(session: PortableSession, role: str, content, phase=
         else:
             text = portable_text([block], session)
             if text:
-                session.messages.append(PortableMessage(role, text, phase=phase))
+                context = ''
+                if session.agent == 'codex' and role == 'user':
+                    text, context = split_codex_user_text(text)
+                    if context:
+                        session.note('ambient browser context retained in conversion metadata, outside user prompt')
+                session.messages.append(PortableMessage(role, text, phase=phase, codex_context=context))
 
 
 def projection_digest(payload: dict) -> str:
@@ -2388,6 +2409,11 @@ def restore_teleport_metadata(row: dict, payload: dict, session: PortableSession
 def validate_portable_message(message: PortableMessage) -> None:
     if message.role not in ('user', 'assistant', 'tool') or not isinstance(message.text, str):
         raise ValueError('invalid portable message')
+    if not isinstance(message.codex_context, str) or (message.codex_context and (
+        message.role != 'user' or message.tool is not None or message.synthetic or
+        split_codex_user_text(message.codex_context + message.text) != (message.text, message.codex_context)
+    )):
+        raise ValueError('invalid Codex ambient context')
     if message.phase not in (None, 'commentary', 'final_answer'):
         raise ValueError('unsupported assistant phase')
     if not isinstance(message.synthetic, bool) or (message.synthetic and (
@@ -2698,7 +2724,7 @@ def codex_item(message: PortableMessage) -> dict:
                               [dict(type='input_text', text='[Tool error]'), *output])
         return item
     item = dict(type='message', role=message.role, content=[dict(
-        type='input_text' if message.role == 'user' else 'output_text', text=message.text)])
+        type='input_text' if message.role == 'user' else 'output_text', text=message.codex_context + message.text)])
     if message.phase is not None:
         item['phase'] = message.phase
     return item

@@ -141,3 +141,21 @@ WSL environment variables are not assumed to propagate to Windows.
 The following commit records these results only; it changes no runtime or tests.
 
 The initial native-tool candidate `e0da526` passed all nine [CI checks](https://github.com/aviadr1/claude-session-teleporter/actions/runs/36435345214). The later interruption correction is validated separately on the final PR revision.
+
+## Browser context displayed as user text
+
+The first real desktop import exposed a presentation defect: Codex embeds its
+ambient browser state and `## My request:` separator in user message text.
+Claude displayed the entire string as if the user typed it. A failing CLI
+regression reproduces that exact wrapper shape. The converter now separates a
+recognized leading wrapper from the actual request, retaining its exact bytes
+in checked conversion metadata for a return trip to Codex. Claude's native
+prompt and Codex display events contain the actual request. The browser context
+is not injected into Claude's model prompt; it remains conversion metadata.
+Quoted wrappers, ordinary headings and native Claude-authored text are retained.
+
+A real Claude loader probe confirms the clean outgoing Messages request. The
+existing imported session was repaired separately with a private backup,
+unchanged record IDs/parent links and verification of all 148 portable items;
+three user prompts changed presentation. The general teleport command retains
+its no-overwrite rule. Existing imports are not silently rewritten on retry.

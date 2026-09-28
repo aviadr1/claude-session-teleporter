@@ -95,7 +95,10 @@ namespace. Historical tools are not registered or rerun.
 Both round trips—Claude → Codex → Claude and Codex → Claude → Codex—preserve
 supported conversation content. Conversion metadata retains distinctions the
 other format cannot express directly, such as custom tool input, argument JSON
-formatting, error flags and assistant phases. It is checked against the native
+formatting, error flags and assistant phases. Codex ambient browser wrappers are
+kept in conversion metadata, outside Claude user prompts, and restored on return
+to Codex. Quoted examples and user-authored headings are preserved. Metadata is
+checked against the native
 record before reuse; changed native content takes precedence. New session IDs
 and message envelopes are expected, and clients that discard this metadata can
 reduce return-trip fidelity. See the [native-tool investigation and tests](docs/teleport-native-tools.md).

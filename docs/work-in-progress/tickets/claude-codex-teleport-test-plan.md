@@ -51,3 +51,11 @@ Frozen native-tool implementation `f081c23`: Linux 141 passed (five real-client 
 - [x] Real Claude interruption probe found discarded late tool output; two fail-first CLI regressions now reject nonadjacent result groups before publication.
 
 Final interruption correction `57458ed`: Linux 143 passed, Python 3.10 and native Windows 138 passed each; package build passed. The Windows-to-WSL publication path is unchanged from the verified `f081c23` implementation.
+
+
+## Ambient browser context correction
+
+- [x] CLI import displays only the actual user request; two round trips restore the exact Codex model-context text and keep display events clean.
+- [x] Negative controls preserve quoted wrappers, ordinary headings, unknown/malformed wrappers, and native Claude text.
+- [x] Installed Claude loader sends a clean user prompt to the loopback Messages endpoint.
+- [x] Linux: 151 passed, 2 skipped with real-client probes; Python 3.10 and native Windows: 146 passed, 7 skipped each. The seven independent live-store drift checks remain excluded as previously documented.

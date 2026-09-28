@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from conftest import cs
 from teleport_support import (ANSWER, PROMPT, claude_rows, codex_rows, write_rows,
-                              tool_rows, TOOL_OUTPUT, CALL_ID, teleport, native_history, parallel_branch_rows)
+                              tool_rows, TOOL_OUTPUT, CALL_ID, teleport, native_history, parallel_branch_rows, BROWSER_PREFIX)
 
 pytestmark = pytest.mark.skipif(os.environ.get('RUN_CLIENT_PROBES') != '1', reason='opt-in real client probes')
 
@@ -210,7 +210,9 @@ def test_real_codex_discovery_read_resume_and_model_context(tmp_path, assistant_
 
 def test_real_claude_resume_model_context(tmp_path):
     cwd = tmp_path/'project'; cwd.mkdir()
-    source = write_rows(tmp_path/'codex.jsonl', codex_rows(cwd))
+    rows = codex_rows(cwd)
+    rows[1]['payload']['content'][0]['text'] = BROWSER_PREFIX + PROMPT
+    source = write_rows(tmp_path/'codex.jsonl', rows)
     home = tmp_path/'claude'
     assert cs.main(['teleport', str(source), '--to', 'claude', '--target-home', str(home), '--apply']) == 0
     imported = cs.read_portable_session(next(home.rglob('*.jsonl')))
@@ -220,6 +222,8 @@ def test_real_claude_resume_model_context(tmp_path):
         request = requests.get(timeout=2)
         messages = request['messages']
         assert PROMPT in json.dumps(messages[0]) and messages[0]['role'] == 'user'
+        assert 'in-app-browser-context' not in json.dumps(messages)
+        assert '## My request:' not in json.dumps(messages)
         assert ANSWER in json.dumps(messages[1]) and messages[1]['role'] == 'assistant'
 
 

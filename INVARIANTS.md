@@ -373,3 +373,17 @@ for every fork; this is semantic round-trip preservation, not byte identity.
 > metadata, parallel sibling results, incomplete/duplicate pairs, malformed IDs,
 > and nonaccumulating prefaces. Both successful real-client continuation probes
 > also teleport back and compare the original conversation content.
+
+### T7 — App-supplied browser context is not the user's typed prompt
+
+`split_codex_user_text` recognizes only a complete leading Codex browser-context
+wrapper with the known ambient-state disclaimer and request separator. It leaves
+quoted examples, ordinary headings and native Claude text alone. The shared
+message retains the exact prefix in `codex_context`: Claude content and Codex
+display events use the clean request, while `codex_item` restores the original
+model-context text on return. `validate_portable_message` checks this field and
+metadata restoration still verifies agreement with the native projection.
+
+> `tests/test_prompt_context.py` covers repeated round trips and negative controls.
+> `test_real_claude_resume_model_context` verifies the installed Claude loader sends
+> the clean prompt to the loopback model endpoint.
