@@ -63,3 +63,15 @@ external clients: imports should finish before the destination is opened.
 Abrupt process termination can leave partial files; rerunning now reports that
 state instead of falsely reporting success. This is not an ACID transaction
 across the client stores, and the tool does not perform automatic recovery.
+
+
+## Frozen-candidate verification
+
+Implementation commit `9f7cea9` passed 119 Linux tests including five real-client
+probes, with 2 skips. Native Windows and Python 3.10 each passed 114 tests with
+7 skips. Those runs deselected the 7 existing live-store drift checks described
+above. The separate actual Windows-to-WSL publication probe passed. All nine
+[CI checks](https://github.com/aviadr1/claude-session-teleporter/actions/runs/36420111947)
+passed on that implementation: the Linux/Windows/macOS matrix, bare interpreter
+and package build. The following documentation update changes no runtime or
+test code.

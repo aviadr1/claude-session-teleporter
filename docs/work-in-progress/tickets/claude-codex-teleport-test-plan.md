@@ -24,6 +24,12 @@ is not claimed by the backend/metadata checks above. Wheel/sdist builds pass.
 - [x] Default Codex discovery respects the configured provider and assistant-first imports.
 - [x] Partial desktop imports fail explicitly instead of claiming success.
 - [x] Both real clients complete synthetic turns and retain original/new history across restart.
-- [ ] Final red-team candidate: full Linux, native Windows, Python 3.10, Windows-to-WSL, and CI checks.
+- [x] Final red-team candidate: full Linux, native Windows, Python 3.10, Windows-to-WSL, and CI checks.
 
 Detailed reproducers and verification boundaries: docs/teleport-redteam.md.
+
+Frozen implementation `9f7cea9`: Linux 119 passed (5 real-client probes),
+2 skipped; native Windows and Python 3.10 each 114 passed, 7 skipped;
+7 live-store drift checks deselected in each run. The separate actual
+Windows-to-WSL publication probe passed. All 9 CI checks passed in run
+https://github.com/aviadr1/claude-session-teleporter/actions/runs/36420111947.
