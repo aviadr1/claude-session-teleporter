@@ -9,7 +9,7 @@
 > **Oh, you _can_ take it with you.**
 > Out of quota, not out of context.
 
-**Your Claude Code sessions aren't gone. They're under the other org.**
+**Resume across Claude accounts, Windows/WSL, and now Claude ↔ Codex.**
 
 Switch orgs or accounts in the Claude desktop app and your sessions vanish from
 the list. Run `claude` inside WSL and the Windows app never shows those sessions
@@ -45,6 +45,76 @@ the app** (or restart it). The app caches its session list and only re-reads
 the disk when you do.
 
 No uv? The tool is [one standard-library file](#install) you can download and run.
+
+## Teleport between Claude and Codex
+
+The new `teleport` command converts a local Claude transcript or Codex rollout
+into an **independent, resumable fork** in the other client. It supports CLI
+resumption, Codex desktop's shared session store, and optional Claude desktop
+partition metadata. These are private formats: see the [probe results and
+validation limits](docs/teleport-investigation.md).
+
+```bash
+# Find source transcript paths (read-only; newest 20 by default)
+claude-sessions sessions --agent claude
+claude-sessions sessions --agent codex -n 10
+
+# Claude -> Codex: inspect the plan, then create the session
+claude-sessions teleport /path/to/claude-session.jsonl --to codex
+claude-sessions teleport /path/to/claude-session.jsonl --to codex --apply
+
+# Codex -> Claude CLI
+claude-sessions teleport /path/to/rollout.jsonl --to claude --apply
+
+# Codex -> Claude CLI AND the signed-in Claude desktop partition
+claude-sessions teleport /path/to/rollout.jsonl --to claude --desktop-partition active --apply
+
+# Run from Windows to put the Claude transcript in WSL and register it in desktop
+claude-sessions teleport C:/exports/rollout.jsonl --to claude --target-host wsl:Ubuntu --cwd /home/me/repo --desktop-partition active --apply
+```
+
+The command prints the new ID and `codex resume <id>` or `claude --resume <id>`.
+Run it in the printed working directory using the same client home. Codex
+desktop may need a restart to discover the chat; Claude desktop needs a session
+list reload (switch accounts or restart). Include `--desktop-partition` on the
+initial Claude import: repeats leave existing imports untouched.
+
+Use `--target-home DIR` to select the destination `.codex` or `.claude` directory;
+the defaults honor `CODEX_HOME` and `CLAUDE_CONFIG_DIR`. For listing another
+store use `sessions --agent codex --home DIR` (`--all` includes archived Codex
+rollouts). Windows and WSL stores are separate. When their path spellings
+differ, supply `--cwd` in the destination's syntax; the working tree must
+already exist. The tool does not move files or rewrite paths inside messages.
+
+**What transfers:** active user/assistant text and completed native tool calls
+and results, including their IDs, names, arguments, output and order. Claude
+uses `tool_use`/`tool_result`; Codex uses function/custom call and output items.
+Codex also receives completed tool cards under an `imported_history` display
+namespace. Historical tools are not registered or rerun.
+
+Both round trips—Claude → Codex → Claude and Codex → Claude → Codex—preserve
+supported conversation content. Conversion metadata retains distinctions the
+other format cannot express directly, such as custom tool input, argument JSON
+formatting, error flags and assistant phases. It is checked against the native
+record before reuse; changed native content takes precedence. New session IDs
+and message envelopes are expected, and clients that discard this metadata can
+reduce return-trip fidelity. See the [native-tool investigation and tests](docs/teleport-native-tools.md).
+
+Private reasoning and source system instructions are omitted; images and
+unsupported content get placeholders. Compaction transfers the surviving
+context, which may exclude older turns. The dry run reports these changes.
+Tool permissions, credentials and running processes do not transfer. Pending,
+orphaned or duplicate tool exchanges are rejected before writing; finish the
+source turn first. Claude imports also reject results separated from their call
+group by intervening turns, because its loader discards that output. Destination
+tools and project instructions apply on resume.
+
+Dry runs create nothing. Applying never edits the source or overwrites an
+existing import. Repeating the command is a no-op, including for archived Codex
+imports. Deleted Claude desktop imports are refused. Malformed/incomplete transcripts,
+unsupported rollback history and unavailable directories are rejected. Partial desktop
+imports are reported as errors; existing files are preserved for inspection.
+See the [red-team findings and fixes](docs/teleport-redteam.md).
 
 ## What it looks like
 

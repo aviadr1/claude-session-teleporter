@@ -29,7 +29,7 @@ never to make it untrue.
 
 ### S1 - No write command writes anything without `--apply`
 
-`copy`, `adopt` and `eject` are dry runs by default. A dry run prints its plan
+`copy`, `adopt`, `eject` and `teleport` are dry runs by default. A dry run prints its plan
 and touches nothing: no metadata, no transcript, no ledger.
 
 > `test_dry_run_writes_nothing[copy]`, `[adopt]`, `[eject]`
@@ -98,7 +98,7 @@ tool approval.
 
 > `test_adopt_resets_permission_mode`
 
-### S11 - `eject` is the only command that forks, and it says so
+### S11 - `eject` and `teleport` fork, and say so
 
 `eject` writes a second transcript; the Windows session keeps its own. It uses
 exclusive create too, and refuses a destination that already exists rather than
@@ -275,3 +275,101 @@ is no store, so CI stays green on a bare runner.
 
 If Anthropic changes a format, that file fails first - before anyone points the
 tool at their sessions.
+
+
+## Cross-client teleport
+
+### T1 — Dry runs never write; imports never change the source or an existing fork
+
+The ID is derived from the source client/ID and destination client/cwd. Repeats
+never append newer source messages to a destination that may have evolved.
+Archived Codex imports and Claude desktop tombstones remain respected.
+
+> `test_teleport_dry_run_apply_and_repeat`,
+> `test_archived_codex_import_is_not_resurrected`,
+> `test_desktop_tombstone_blocks_import`
+
+### T2 — Preserve active conversation order without replaying foreign tools
+
+Claude follows its last main parent chain plus results explicitly linked to its
+parallel calls; Codex uses replacement context after compaction. Tools stay native
+call/result records, preserving their authority and IDs. Incomplete or ambiguous
+pairs fail before writing. Imported calls are completed history, never replayed.
+Reasoning and source instructions/permissions
+are omitted; unsupported media gets an explicit placeholder and notice.
+
+> `test_claude_follows_latest_branch_not_siblings`,
+> `test_codex_compaction_uses_replacement_context`,
+> `test_codex_fork_with_inherited_parent_header`,
+> `test_tools_are_structured_and_private_reasoning_is_omitted`,
+> `test_images_get_visible_placeholder_and_notice`,
+> `test_source_permissions_and_instructions_never_transfer`
+
+### T3 — Invalid or unsupported input fails before publication
+
+No guessed history for malformed JSON, orphaned Claude branches, Codex
+rollbacks or summary-only compactions. Publish complete files without replacing
+concurrent writers; roll back unchanged files from our own operation on a
+multi-file failure. Preserve files detected as replaced, edited or removed by
+another consumer. A partial desktop import is an explicit error, not success.
+
+> `test_bad_source_fails_without_writes`, `test_missing_branch_parent_fails`,
+> `test_refused_import_does_not_create_destination`,
+> `test_publish_failure_rolls_back_only_our_files`
+
+### T4 — Desktop history and destination placement must match the imported transcript
+
+Codex needs model response items AND display events. Claude metadata points to
+the native or WSL transcript and inherits only destination connector settings,
+with donor permissions reset. Actual GUI interaction remains unverified; the
+Codex backend and both CLI loaders are exercised by opt-in binary probes.
+
+> `test_codex_has_both_model_history_and_desktop_history`,
+> `test_desktop_metadata_uses_destination_and_resets_permissions`,
+> `test_wsl_desktop_points_at_imported_transcript`,
+> `test_real_codex_discovery_read_resume_and_model_context`,
+> `test_real_claude_resume_model_context`
+
+
+### T5 — Discovery and continuation use the destination client context
+
+Imported Codex sessions inherit the destination provider instead of claiming
+OpenAI regardless of configuration. Assistant-first histories get a labeled
+synthetic import preface so clients can discover and resume them.
+
+> `test_assistant_first_history_gets_explicit_import_context`,
+> `test_real_codex_discovery_read_resume_and_model_context`,
+> `test_real_codex_tool_evidence_and_completed_turn_survive_restart`,
+> `test_real_claude_tool_evidence_and_completed_turn_survive_restart`
+
+Adversarial coverage for T2/T3 additionally includes:
+`test_tool_output_never_becomes_a_user_instruction`,
+`test_mixed_claude_content_keeps_user_text_separate_from_tool_output`,
+`test_failed_desktop_publication_preserves_replaced_transcript`,
+`test_cleanup_preserves_a_consumers_changes`, and
+`test_retry_of_partial_desktop_import_is_not_reported_successful`.
+
+
+### T6 — Supported conversation content survives both round trips
+
+`PortableMessage` is the shared text/tool model for both readers and writers.
+`validate_portable_tools` enforces complete, unique exchanges. `teleport_rows`
+also enforces adjacent Claude call/result groups, preventing its native loader
+from silently discarding late results. Each generated
+native record has versioned conversion metadata, bound to its projection by a
+SHA-256 digest. Restoration validates the metadata shape and reprojects it to
+ensure it agrees with the native record; edited native content takes precedence.
+Only portable content is retained, never source permissions or private reasoning.
+The metadata is regenerated, not recursively nested. Synthetic discovery
+prefaces are removed on read and regenerated once when necessary.
+
+Enforcement: `with_teleport_metadata`, `restore_teleport_metadata`,
+`validate_portable_message`, `validate_portable_tools`, `_claude_portable`.
+Native sessions remain independently readable if metadata is removed, but
+format-specific fidelity can decrease. Session IDs and message envelopes change
+for every fork; this is semantic round-trip preservation, not byte identity.
+
+> `tests/test_native_tools.py` — repeated CLI round trips, stale/contradictory
+> metadata, parallel sibling results, incomplete/duplicate pairs, malformed IDs,
+> and nonaccumulating prefaces. Both successful real-client continuation probes
+> also teleport back and compare the original conversation content.

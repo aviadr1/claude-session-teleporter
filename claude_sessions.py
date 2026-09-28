@@ -45,6 +45,7 @@ Commands:
   copy         copy sessions between partitions (dry-run by default)
   adopt        surface WSL CLI sessions in the desktop app (dry-run by default)
   eject        put a desktop session's transcript where the WSL CLI finds it
+  teleport     fork conversation history between Claude and Codex
   label        give a partition a human-readable name
   guide        print a start-to-finish walkthrough
   skill        print or install a Claude Code skill for this tool
@@ -66,6 +67,7 @@ source host: adopt only writes desktop metadata, eject only writes into WSL.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -73,9 +75,10 @@ import shlex
 import subprocess
 import sys
 import time
+import tempfile
 import uuid as _uuid
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -593,6 +596,12 @@ def _ms(iso: str) -> int:
         return 0
 
 
+def transcript_cwd(cwds: list[str], project_dir: str) -> str:
+    """F2/F3: the store directory distinguishes a moved project from a visit."""
+    return next((cwd for cwd in reversed(cwds) if encode_cwd(cwd) == project_dir),
+                cwds[-1] if cwds else '')
+
+
 def read_cli_session(host: Host, path: Path, deep: bool = True) -> CliSession | None:
     """
     Reconstruct a CliSession from a transcript.
@@ -660,9 +669,7 @@ def read_cli_session(host: Host, path: Path, deep: bool = True) -> CliSession | 
     # the directory names the CURRENT cwd. Prefer the cwd that agrees with it,
     # and keep the first one as the origin - the same split the app itself makes.
     sess.origin_cwd = cwds[0]
-    sess.cwd = next(
-        (c for c in reversed(cwds) if encode_cwd(c) == sess.project_dir), cwds[-1]
-    )
+    sess.cwd = transcript_cwd(cwds, sess.project_dir)
     # visiting a subdirectory and coming back is not a move; ending up somewhere
     # else is - that is the case worth telling the user about
     sess.moved = sess.origin_cwd != sess.cwd
@@ -1091,6 +1098,10 @@ def cmd_hosts(args) -> int:
 
 
 def cmd_sessions(args) -> int:
+    if args.agent:
+        return cmd_agent_sessions(args)
+    if args.home:
+        die('--home requires --agent claude or --agent codex')
     if args.host and args.host.lower() not in ("windows", "win", "local", "host"):
         return _sessions_on_host(args)
     parts = load_partitions()
@@ -1696,7 +1707,7 @@ def cmd_eject(args) -> int:
 
 SKILL_MD = '''---
 name: claude-session-teleporter
-description: Find and move Claude Code sessions between account/org partitions, and between WSL and the Windows desktop app. Use when the user says sessions are "missing", "gone", or "not showing up" after switching orgs or accounts, asks where Claude Code stores sessions, wants to continue a session from their other org, wants a session they started in WSL to show up in the Claude app on Windows (or the reverse), or hits a rate limit on one org and wants their work available in another.
+description: Find and move sessions between Claude and Codex, across Claude account/org partitions, and between WSL and the Windows desktop app. Use when the user says sessions are "missing", "gone", or "not showing up" after switching orgs or accounts, asks where Claude Code stores sessions, wants to continue a session from their other org, wants a session they started in WSL to show up in the Claude app on Windows (or the reverse), or hits a rate limit on one org and wants their work available in another.
 user-invocable: true
 allowed-tools:
   - Bash({allow} *)
@@ -1705,10 +1716,11 @@ allowed-tools:
 
 # Claude Session Teleporter
 
-`{tool}` moves Claude Code sessions along two independent axes.
+`{tool}` moves sessions along three independent axes.
 
 | axis | what differs | command |
 |---|---|---|
+| **client** | Claude vs Codex, different transcript formats | `teleport` |
 | **partition** | account/org, same machine, same transcripts | `copy` |
 | **host** | WSL vs Windows - different filesystem, different Claude Code install | `adopt` / `eject` |
 
@@ -1782,6 +1794,21 @@ UUIDs: `{run} label 3c426532 work`.
 
 Do one session first to prove the round trip before doing all of them.
 
+## Claude ↔ Codex
+
+Use `{run} sessions --agent claude` or `--agent codex` to find transcript paths.
+Then `{run} teleport /path/to/transcript.jsonl --to codex` (or `--to claude`).
+Dry-run first; `--apply` creates an independent fork. For Claude desktop include
+`--desktop-partition active` on the initial import. For another store use
+`--target-home`; for another working directory use `--cwd`.
+
+Inspect the conversion notices: completed tools retain native call/result
+structure; pending or ambiguous exchanges are rejected. Both round trips retain
+supported content using checked conversion metadata. Private reasoning and source
+instructions are omitted; unsupported media gets placeholders. Compacted sessions
+transfer active context, not every historical turn, file or running process.
+Resume the printed ID with the destination CLI or refresh the desktop app.
+
 ## Guarantees
 
 State these when the user asks whether it is safe. All three commands:
@@ -1797,7 +1824,7 @@ transcript is missing, and refuses cross-account copies without
 desktop uuid from the WSL session id so re-running is idempotent rather than
 duplicating.
 
-**`eject` is the one exception: it does write a second transcript.** The Windows
+**`eject` and cross-client `teleport` write a second transcript.** The Windows
 session keeps its own. Say this out loud - after eject there are two independent
 continuations of one history, and the user must not run both at once.
 
@@ -2019,6 +2046,10 @@ WHEN IT LOOKS WRONG
 
 def cmd_guide(args) -> int:
     tool = Path(sys.argv[0]).name or "claude_sessions.py"
+    print("Claude <-> Codex: use sessions --agent claude (or codex) to find a transcript.")
+    print(f"  {tool} teleport /path/to/transcript.jsonl --to codex   # dry run")
+    print("Use --to claude for the reverse; --apply writes a new independent fork.")
+    print("For Claude desktop add --desktop-partition active on the initial import.\n")
     print(GUIDE.replace("{h}", G.h * 74).replace("{tool}", tool).replace("{dot}", G.dot), end="")
     return 0
 
@@ -2070,7 +2101,7 @@ def cmd_label(args) -> int:
 
 
 DESCRIPTION = """\
-Teleport Claude Code desktop sessions between account/org partitions.
+Teleport Claude Code sessions across partitions/hosts, and between Claude and Codex.
 
 The desktop app shows only the partition you are signed into, so sessions from
 another org look missing even though they are on disk. This finds them and
@@ -2177,6 +2208,724 @@ this one does fork:
 """
 
 
+# ---------------------------------------------------------------------------
+# cross-client teleport: a fresh, resumable fork of portable conversation state
+# ---------------------------------------------------------------------------
+
+TELEPORT_NS = _uuid.UUID('0daa8b13-5778-4cb5-8af4-7fa391f6b0dd')
+IMPORT_PREFACE = '[Import context] Imported conversation history follows.'
+
+
+@dataclass
+class PortableMessage:
+    role: str
+    text: str = ''
+    # Calls/results use Responses item shapes as the shared representation.
+    # Claude's error flag is retained separately from the native Codex payload.
+    tool: dict | None = None
+    phase: str | None = None
+    synthetic: bool = False
+
+
+@dataclass
+class PortableSession:
+    agent: str
+    session_id: str
+    cwd: str
+    timestamp: str
+    messages: list[PortableMessage] = field(default_factory=list)
+    notices: dict[str, int] = field(default_factory=dict)
+
+    def note(self, description: str) -> None:
+        self.notices[description] = self.notices.get(description, 0) + 1
+
+
+def agent_home(agent: str) -> Path:
+    key, folder = ('CODEX_HOME', '.codex') if agent == 'codex' else ('CLAUDE_CONFIG_DIR', '.claude')
+    return Path(os.environ.get(key) or Path.home() / folder).expanduser()
+
+
+def native_path(path: Path) -> Path:
+    """Windows file APIs need extended paths independently of Python's manifest."""
+    if os.name != 'nt':
+        return path
+    value = str(path.resolve())
+    if value.startswith('\\\\?\\'):
+        return Path(value)
+    return Path('\\\\?\\UNC\\' + value[2:] if value.startswith('\\\\') else '\\\\?\\' + value)
+
+
+def cmd_agent_sessions(args) -> int:
+    if args.partition or args.host or args.cli or args.desktop:
+        die('--agent cannot be combined with partition/host/origin filters; use --home')
+    if args.limit is not None and args.limit < 1:
+        die('--limit must be positive')
+    home = native_path(Path(args.home).expanduser() if args.home else agent_home(args.agent))
+    try:
+        if args.agent == 'claude':
+            files = list((home / 'projects').glob('*/*.jsonl'))
+        else:
+            files = list((home / 'sessions').rglob('*.jsonl'))
+            if args.all:
+                files += list((home / 'archived_sessions').rglob('*.jsonl'))
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in files[:args.limit or 20]:
+            try:
+                session = read_portable_session(path)
+            except ValueError as exc:
+                print(f'Unavailable: {path}\n  {exc}')
+                continue
+            print(f'{session.agent} {session.session_id}  {session_title(session)}')
+            print(f'  cwd: {session.cwd}\n  transcript: {path}')
+        if not files:
+            print(f'No {args.agent} transcripts found under {home}.')
+        return 0
+    except OSError as exc:
+        die(str(exc))
+
+
+def portable_text(content, session: PortableSession) -> str:
+    """Text-only projection for previews and unsupported media placeholders."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise ValueError('unsupported message content shape')
+    out = []
+    for block in content:
+        if not isinstance(block, dict):
+            raise ValueError('invalid content block')
+        kind = block.get('type', 'unknown')
+        if kind in ('text', 'input_text', 'output_text'):
+            if not isinstance(block.get('text'), str):
+                raise ValueError('text block has no text')
+            out.append(block['text'])
+        elif kind in ('thinking', 'redacted_thinking', 'reasoning', 'encrypted_content'):
+            session.note('private reasoning omitted')
+        else:
+            session.note(f'{kind} content omitted (placeholder retained)')
+            out.append(f'[Imported {kind} content unavailable; consult the original session.]')
+    return '\n'.join(out)
+
+
+def portable_output(value, session: PortableSession):
+    """Keep text result arrays structured; translate their block vocabulary once."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise ValueError('unsupported tool output shape')
+    return [dict(type='input_text', text=portable_text([block], session)) for block in value]
+
+
+def append_portable_content(session: PortableSession, role: str, content, phase=None) -> None:
+    if isinstance(content, str):
+        content = [dict(type='text', text=content)]
+    if not isinstance(content, list):
+        raise ValueError('unsupported message content shape')
+    for block in content:
+        if not isinstance(block, dict):
+            raise ValueError('invalid content block')
+        kind = block.get('type')
+        if kind == 'tool_use':
+            if role != 'assistant' or not isinstance(block.get('input'), dict):
+                raise ValueError('invalid Claude tool call')
+            session.messages.append(PortableMessage('assistant', tool=dict(
+                type='function_call', call_id=block.get('id'), name=block.get('name'),
+                arguments=json.dumps(block['input'], ensure_ascii=False))))
+        elif kind == 'tool_result':
+            if role != 'user':
+                raise ValueError('invalid Claude tool result role')
+            tool = dict(type='function_call_output', call_id=block.get('tool_use_id'),
+                        output=portable_output(block.get('content', ''), session))
+            if 'is_error' in block:
+                tool['is_error'] = block['is_error']
+            session.messages.append(PortableMessage('tool', tool=tool))
+        else:
+            text = portable_text([block], session)
+            if text:
+                session.messages.append(PortableMessage(role, text, phase=phase))
+
+
+def projection_digest(payload: dict) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                    separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def with_teleport_metadata(row: dict, payload: dict, messages: list[PortableMessage]) -> dict:
+    # T6: the native projection is usable independently; conversion metadata
+    # restores format-only distinctions without nesting prior import envelopes.
+    row['teleporter'] = dict(version=1, digest=projection_digest(payload),
+                             items=[asdict(message) for message in messages])
+    return row
+
+
+def restore_teleport_metadata(row: dict, payload: dict, session: PortableSession) -> bool:
+    data = row.get('teleporter')
+    if data is None:
+        return False
+    if not isinstance(data, dict) or data.get('version') != 1 or data.get('digest') != projection_digest(payload):
+        session.note('stale or unknown conversion metadata ignored; native history used')
+        return False
+    try:
+        items = [PortableMessage(**item) for item in data['items']]
+    except (KeyError, TypeError):
+        raise ValueError('invalid conversion metadata') from None
+    try:
+        for item in items:
+            validate_portable_message(item)
+        if row['type'] == 'response_item':
+            projected = codex_item(items[0]) if len(items) == 1 else None
+        else:
+            roles = {'user' if item.role == 'tool' else item.role for item in items}
+            projected = dict(role=next(iter(roles)), content=[claude_block(item) for item in items]) if len(roles) == 1 else None
+        if projected != payload:
+            raise ValueError('conversion metadata contradicts native history')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'invalid conversion metadata: {exc}') from None
+    session.messages.extend(item for item in items if not item.synthetic)
+    return True
+
+
+def validate_portable_message(message: PortableMessage) -> None:
+    if message.role not in ('user', 'assistant', 'tool') or not isinstance(message.text, str):
+        raise ValueError('invalid portable message')
+    if message.phase not in (None, 'commentary', 'final_answer'):
+        raise ValueError('unsupported assistant phase')
+    if not isinstance(message.synthetic, bool) or (message.synthetic and (
+        message.role != 'user' or message.text != IMPORT_PREFACE or message.tool is not None
+    )):
+        raise ValueError('invalid synthetic import preface')
+    tool = message.tool
+    if tool is None:
+        if message.role == 'tool':
+            raise ValueError('tool result is missing its payload')
+        return
+    if not isinstance(tool, dict) or not isinstance(tool.get('call_id'), str) or not tool['call_id']:
+        raise ValueError('tool call/result is missing its call ID')
+    if message.text or message.phase is not None:
+        raise ValueError('tool payload cannot also carry message text or phase')
+    if tool.keys() - {'type', 'call_id', 'name', 'namespace', 'arguments', 'input', 'output', 'is_error'}:
+        raise ValueError('unsupported portable tool fields')
+    if tool.get('namespace') is not None and not isinstance(tool['namespace'], str):
+        raise ValueError('invalid tool namespace')
+    kind = tool.get('type')
+    if kind in ('function_call', 'custom_tool_call'):
+        key = 'arguments' if kind == 'function_call' else 'input'
+        if message.role != 'assistant' or not isinstance(tool.get('name'), str) or not tool['name']:
+            raise ValueError('invalid tool call name or role')
+        if not isinstance(tool.get(key), str):
+            raise ValueError('invalid tool call input')
+    elif kind in ('function_call_output', 'custom_tool_call_output'):
+        output = tool.get('output')
+        if message.role != 'tool' or not isinstance(output, (str, list)):
+            raise ValueError('invalid tool output')
+        if isinstance(output, list) and any(not isinstance(block, dict) or
+                block.get('type') != 'input_text' or not isinstance(block.get('text'), str) or
+                block.keys() != {'type', 'text'} for block in output):
+            raise ValueError('invalid tool output block')
+        if 'is_error' in tool and not isinstance(tool['is_error'], bool):
+            raise ValueError('invalid tool error flag')
+    else:
+        raise ValueError('unsupported portable tool item')
+
+
+def validate_portable_tools(session: PortableSession) -> None:
+    """T2/T6: only complete, unambiguous historical exchanges may cross clients."""
+    calls, completed = {}, set()
+    for message in session.messages:
+        validate_portable_message(message)
+        tool = message.tool
+        if tool is None:
+            continue
+        kind, call_id = tool['type'], tool['call_id']
+        if kind in ('function_call', 'custom_tool_call'):
+            if call_id in calls:
+                raise ValueError('duplicate tool call ID')
+            calls[call_id] = kind
+        else:
+            if calls.get(call_id) != kind.removesuffix('_output'):
+                raise ValueError('orphan or mismatched tool result; export a complete exchange')
+            if call_id in completed:
+                raise ValueError('duplicate tool result ID')
+            completed.add(call_id)
+    if calls.keys() != completed:
+        raise ValueError('pending tool call; finish the source turn before teleporting')
+
+
+def session_title(session: PortableSession) -> str:
+    return next((m.text.splitlines()[0] for m in session.messages if m.text.strip()), 'Imported tool history')[:70]
+
+
+def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
+    # Follow the last main-chain leaf, including non-message parent nodes. File
+    # order alone can replay abandoned branches or subagents as user history.
+    for rec in records:
+        for key in ('uuid', 'parentUuid', 'sourceToolAssistantUUID'):
+            if rec.get(key) is not None and not isinstance(rec[key], str):
+                raise ValueError(f'invalid Claude {key}')
+        if rec.get('type') not in ('user', 'assistant'):
+            continue
+        message = rec.get('message')
+        if not isinstance(message, dict):
+            raise ValueError('invalid Claude message')
+        content = message.get('content')
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') in ('tool_use', 'tool_result'):
+                    key = 'id' if block['type'] == 'tool_use' else 'tool_use_id'
+                    if not isinstance(block.get(key), str) or not block[key]:
+                        raise ValueError('invalid Claude tool call/result ID')
+    nodes = {r['uuid']: r for r in records if r.get('uuid') and not r.get('isSidechain')}
+    leaves = [r for r in records if r.get('type') in ('user', 'assistant')
+              and r.get('uuid') in nodes and not r.get('isSidechain')]
+    if not leaves:
+        raise ValueError('no main-chain Claude conversation found')
+    chain, seen, node = [], set(), leaves[-1]
+    while node:
+        key = node['uuid']
+        if key in seen:
+            raise ValueError('cycle in Claude parent chain')
+        seen.add(key)
+        chain.append(node)
+        parent = node.get('parentUuid')
+        if node.get('subtype') == 'compact_boundary' or not parent:
+            break
+        if parent not in nodes:
+            raise ValueError('missing Claude parent; export a complete transcript')
+        node = nodes[parent]
+    chain.reverse()
+    # T2: parallel Claude tool results are siblings, not ancestors of the last
+    # leaf. Recover only results explicitly linked to active tool-call nodes;
+    # unrelated user/assistant branches must remain excluded.
+    active_calls = {}
+    active_results = set()
+    for rec in chain:
+        content = rec.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if rec.get('type') == 'assistant' and block.get('type') == 'tool_use':
+                active_calls[block.get('id')] = rec['uuid']
+            elif block.get('type') == 'tool_result':
+                active_results.add(block.get('tool_use_id'))
+    siblings = []
+    for rec in records:
+        if rec.get('type') != 'user' or rec.get('uuid') in seen or nodes.get(rec.get('uuid')) is not rec:
+            continue
+        content = rec.get('message', {}).get('content', [])
+        if not isinstance(content, list) or not content:
+            continue
+        # Mixed user text on an abandoned branch cannot be reintroduced as if
+        # it were active. Only pure tool-result records qualify for recovery.
+        if all(isinstance(block, dict) and block.get('type') == 'tool_result' and
+               block.get('tool_use_id') in active_calls and block.get('tool_use_id') not in active_results and
+               active_calls[block['tool_use_id']] in (rec.get('sourceToolAssistantUUID'), rec.get('parentUuid'))
+               for block in content):
+            siblings.append(rec)
+    if siblings:
+        order = {id(rec): index for index, rec in enumerate(records)}
+        chain = sorted([*chain, *siblings], key=lambda rec: order[id(rec)])
+    sid = leaves[-1].get('sessionId')
+    if not isinstance(sid, str) or not sid:
+        raise ValueError('Claude sessionId is missing')
+    cwds = [r['cwd'] for r in chain if isinstance(r.get('cwd'), str) and r['cwd']]
+    # Match existing Claude locator semantics: a visited subdirectory need not
+    # be the project where the transcript actually lives (F2/F3).
+    cwd = transcript_cwd(cwds, project_dir)
+    stamp = next((r['timestamp'] for r in chain if r.get('timestamp')), '')
+    session = PortableSession('claude', sid, cwd, stamp)
+    for rec in chain:
+        if rec.get('sessionId', sid) != sid:
+            raise ValueError('mixed Claude session IDs')
+        if rec.get('type') not in ('user', 'assistant'):
+            if rec.get('subtype') == 'compact_boundary':
+                session.note('only the active context after compaction is imported')
+            elif rec.get('type') == 'attachment':
+                session.note('Claude attachment metadata omitted')
+            continue
+        message = rec.get('message')
+        if not isinstance(message, dict) or message.get('role') != rec['type']:
+            raise ValueError('invalid Claude message role')
+        if not restore_teleport_metadata(rec, dict(role=message['role'], content=message.get('content')), session):
+            append_portable_content(session, rec['type'], message.get('content'))
+    # Claude has one result type for function and custom calls. Derive the
+    # result kind from the surviving call, including when a client edited only
+    # one side and invalidated that row's conversion metadata.
+    call_kinds = {}
+    for message in session.messages:
+        validate_portable_message(message)
+        if message.tool:
+            tool = message.tool
+            if message.role == 'assistant':
+                call_kinds[tool['call_id']] = tool['type']
+            elif tool.get('call_id') in call_kinds:
+                tool['type'] = call_kinds[tool['call_id']] + '_output'
+    return session
+
+
+def _codex_portable(records: list[dict]) -> PortableSession:
+    meta = records[0].get('payload')
+    if not isinstance(meta, dict) or not isinstance(meta.get('id'), str):
+        raise ValueError('Codex session metadata is missing its id')
+    session = PortableSession('codex', meta['id'], meta.get('cwd', ''), meta.get('timestamp', ''))
+    items = []
+    for rec in records[1:]:
+        payload = rec.get('payload', {})
+        if not isinstance(payload, dict):
+            raise ValueError('invalid Codex payload')
+        kind = rec.get('type')
+        if kind == 'response_item':
+            items.append((payload, rec))
+        elif kind == 'compacted':
+            # replacement_history is the actual context Codex resumes, not a
+            # duplicate transcript to append to everything before compaction.
+            replacement = payload.get('replacement_history')
+            if not isinstance(replacement, list) or not all(isinstance(x, dict) for x in replacement):
+                raise ValueError('Codex compaction lacks replacement_history; cannot reconstruct context')
+            items = [(item, {}) for item in replacement]
+            session.note('only the active context after compaction is imported')
+        elif kind == 'turn_context' and payload.get('cwd'):
+            session.cwd = payload['cwd']
+        elif kind == 'event_msg' and payload.get('type') == 'thread_rolled_back':
+            raise ValueError('Codex rollback history is not supported; export a fork after the rollback')
+        elif kind == 'session_meta':
+            # Forks can prepend their own header to inherited parent history.
+            # The first header owns this rollout; later headers are provenance.
+            session.note('inherited Codex session metadata omitted')
+    for item, rec in items:
+        if restore_teleport_metadata(rec, item, session):
+            continue
+        kind = item.get('type')
+        if kind == 'message':
+            role = item.get('role')
+            if role not in ('user', 'assistant'):
+                session.note('source system/developer instructions omitted')
+                continue
+            append_portable_content(session, role, item.get('content'), item.get('phase'))
+            continue
+        elif kind in ('function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output'):
+            keys = ('type', 'call_id', 'name', 'namespace', 'arguments', 'input', 'output')
+            tool = {key: item[key] for key in keys if key in item}
+            output = kind.endswith('_output')
+            if output:
+                tool['output'] = portable_output(tool.get('output'), session)
+            session.messages.append(PortableMessage('tool' if output else 'assistant', tool=tool))
+            continue
+        elif kind == 'reasoning':
+            session.note('private reasoning omitted')
+            continue
+        else:
+            session.note(f'Codex {kind} item omitted (placeholder retained)')
+            role, text = 'assistant', f'[Imported {kind} item unavailable; consult the original session.]'
+        if text:
+            session.messages.append(PortableMessage(role, text))
+    return session
+
+
+def read_portable_session(path: Path) -> PortableSession:
+    """Strict snapshot reader: malformed/truncated input fails before any writes."""
+    path = native_path(path)
+    before = path.stat()
+    records = []
+    with path.open(encoding='utf-8-sig') as stream:
+        for number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                raise ValueError(f'invalid JSON on line {number}; stop the source session and retry') from None
+            if not isinstance(record, dict):
+                raise ValueError(f'expected a JSON object on line {number}')
+            records.append(record)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError('source changed while reading; stop the source session and retry')
+    if not records:
+        raise ValueError('empty transcript')
+    session = (_codex_portable(records) if records[0].get('type') == 'session_meta'
+               else _claude_portable(records, path.parent.name))
+    if not session.messages:
+        raise ValueError('no portable conversation content')
+    validate_portable_tools(session)
+    if not isinstance(session.cwd, str) or not isinstance(session.timestamp, str):
+        raise ValueError('invalid source cwd or timestamp')
+    try:
+        stamp = datetime.fromisoformat(session.timestamp.replace('Z', '+00:00'))
+        if stamp.tzinfo is None:
+            raise ValueError()
+    except ValueError:
+        raise ValueError('source timestamp must include a timezone') from None
+    session.timestamp = stamp.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+    return session
+
+
+def claude_block(message: PortableMessage) -> dict:
+    tool = message.tool
+    if tool is None:
+        return dict(type='text', text=message.text)
+    kind = tool['type']
+    if kind.endswith('_output'):
+        output = tool['output']
+        if isinstance(output, list):
+            output = [dict(type='text', text=block['text']) for block in output]
+        block = dict(type='tool_result', tool_use_id=tool['call_id'], content=output)
+        if 'is_error' in tool:
+            block['is_error'] = tool['is_error']
+        return block
+    if kind == 'custom_tool_call':
+        arguments = dict(input=tool['input'])
+    else:
+        try:
+            arguments = json.loads(tool['arguments'])
+        except ValueError:
+            arguments = tool['arguments']
+        # Claude requires an object; metadata retains the original raw input.
+        if not isinstance(arguments, dict):
+            arguments = dict(input=arguments)
+    return dict(type='tool_use', id=tool['call_id'], name=tool['name'], input=arguments)
+
+
+def codex_item(message: PortableMessage) -> dict:
+    if message.tool is not None:
+        item = {key: value for key, value in message.tool.items() if key != 'is_error'}
+        if message.tool.get('is_error'):
+            # Responses has no native is_error bit: expose it inside the tool
+            # result and restore the precise original via conversion metadata.
+            output = item['output']
+            item['output'] = ('[Tool error]\n' + output if isinstance(output, str) else
+                              [dict(type='input_text', text='[Tool error]'), *output])
+        return item
+    item = dict(type='message', role=message.role, content=[dict(
+        type='input_text' if message.role == 'user' else 'output_text', text=message.text)])
+    if message.phase is not None:
+        item['phase'] = message.phase
+    return item
+
+
+def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> list[dict]:
+    validate_portable_tools(session)
+    stamp, rows = session.timestamp, []
+    messages = session.messages
+    if messages[0].role != 'user':
+        messages = [PortableMessage('user', IMPORT_PREFACE,
+                                    synthetic=True), *messages]
+    if target == 'codex':
+        # T5: omit model_provider so discovery uses the destination provider.
+        rows.append(dict(type='session_meta', timestamp=stamp, payload=dict(
+            id=sid, timestamp=stamp, cwd=cwd, originator='claude-session-teleporter',
+            cli_version=__version__, source='cli', history_mode='legacy')))
+        calls = {}
+        for message in messages:
+            item = codex_item(message)
+            rows.append(with_teleport_metadata(dict(type='response_item', timestamp=stamp, payload=item), item, [message]))
+            if message.tool is None:
+                event = dict(type='user_message' if message.role == 'user' else 'agent_message', message=message.text)
+                if message.role == 'user':
+                    event.update(images=[], local_images=[], text_elements=[])
+                else:
+                    event['phase'] = message.phase or 'final_answer'
+            else:
+                tool = message.tool
+                if not tool['type'].endswith('_output'):
+                    calls[tool['call_id']] = tool
+                    event = dict(type='mcp_tool_call_begin', call_id=tool['call_id'], turn_id='',
+                                 invocation=dict(server='imported_history', tool=tool['name'],
+                                                 arguments=claude_block(message)['input']))
+                else:
+                    call = calls[tool['call_id']]
+                    output = item['output']
+                    content = [dict(type='text', text=output)] if isinstance(output, str) else [
+                        dict(type='text', text=block['text']) for block in output]
+                    # The installed Codex reader renders MCP events as completed
+                    # generic tool cards. This display namespace registers no tool.
+                    event = dict(type='mcp_tool_call_end', call_id=tool['call_id'], turn_id='',
+                                 invocation=dict(server='imported_history', tool=call['name'],
+                                                 arguments=claude_block(PortableMessage('assistant', tool=call))['input']),
+                                 result={'Ok': dict(content=content, isError=tool.get('is_error', False))},
+                                 duration=dict(secs=0, nanos=0))
+            rows.append(dict(type='event_msg', timestamp=stamp, payload=event))
+        return rows
+    # Claude requires parallel calls in one assistant message and their results
+    # in the following user message. Group by native role, preserving block order.
+    groups = []
+    for message in messages:
+        role = 'user' if message.role == 'tool' else message.role
+        if groups and groups[-1][0] == role:
+            groups[-1][1].append(message)
+        else:
+            groups.append((role, [message]))
+    # T6: Claude repairs missing/nonadjacent results by dropping late output
+    # and inserting a synthetic interruption. Refuse that lossy projection.
+    for index, (role, group) in enumerate(groups):
+        if role != 'assistant':
+            continue
+        calls = {message.tool['call_id'] for message in group if message.tool}
+        results = ({message.tool['call_id'] for message in groups[index + 1][1] if message.tool}
+                   if index + 1 < len(groups) else set())
+        if calls != results:
+            raise ValueError('Claude cannot preserve this interleaved tool exchange; '
+                             'results must immediately follow their call group')
+    parent = None
+    for index, (role, group) in enumerate(groups):
+        mid = str(_uuid.uuid5(_uuid.UUID(sid), str(index)))
+        projection = dict(role=role, content=[claude_block(message) for message in group])
+        msg = dict(projection)
+        if role == 'assistant':
+            msg.update(id='msg_' + mid.replace('-', ''), type='message', model='imported',
+                       stop_reason='tool_use' if any(m.tool for m in group) else 'end_turn',
+                       stop_sequence=None, usage=dict(input_tokens=0, output_tokens=0))
+        row = dict(type=role, uuid=mid, parentUuid=parent, sessionId=sid,
+                   timestamp=stamp, cwd=cwd, isSidechain=False, userType='external',
+                   entrypoint='cli', version=__version__, message=msg)
+        rows.append(with_teleport_metadata(row, projection, group))
+        parent = mid
+    return rows
+
+
+def publish_teleport_file(temporary: Path, destination: Path) -> None:
+    # Windows rename refuses an existing destination and works over WSL's 9P
+    # share, where CreateHardLink is unsupported. POSIX rename can overwrite,
+    # so use exclusive hard-link publication there instead.
+    if os.name == 'nt':
+        os.rename(temporary, destination)
+    else:
+        os.link(temporary, destination)
+
+
+def _publish_teleport(files: list[tuple[Path, str]], tombstone: Path | None) -> None:
+    """Publish complete files without replacing a winner; roll back our files on failure."""
+    files = [(native_path(path), content) for path, content in files]
+    tombstone = native_path(tombstone) if tombstone is not None else None
+    staged, published = [], []
+    try:
+        for path, content in files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix='.teleport-', dir=path.parent)
+            temporary = Path(name)
+            staged.append(temporary)
+            with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        for (path, _), temporary in zip(files, staged):
+            if tombstone is not None and tombstone.exists():
+                raise ValueError('destination session has a deletion tombstone')
+            # Publish a complete file, never replacing a concurrent writer.
+            expected = temporary.stat()
+            publish_teleport_file(temporary, path)
+            published.append((path, expected))
+    except BaseException:
+        for path, expected in reversed(published):
+            try:
+                actual = path.lstat()
+                # A consumer can replace or resume the transcript before a
+                # later metadata write fails. Preserve that consumer's work.
+                if (actual.st_dev, actual.st_ino, actual.st_size, actual.st_mtime_ns) == (
+                    expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns
+                ):
+                    path.unlink()
+                else:
+                    warn(f'preserved a concurrently changed import: {path}')
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_error:
+                warn(f'could not clean up incomplete import {path}: {cleanup_error}')
+        raise
+    finally:
+        for temporary in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def cmd_teleport(args) -> int:
+    try:
+        source = Path(args.transcript).expanduser()
+        session = read_portable_session(source)
+        if session.agent == args.to:
+            raise ValueError(f'source is already {args.to}; teleport is for crossing clients')
+        if args.target_host and (args.to != 'claude' or args.target_home):
+            raise ValueError('--target-host is for Claude and cannot be combined with --target-home')
+        if args.desktop_partition and args.to != 'claude':
+            raise ValueError('--desktop-partition is only for Claude; Codex uses its sessions store')
+        host = resolve_host(args.target_host) if args.target_host else None
+        env_key = 'CODEX_HOME' if args.to == 'codex' else 'CLAUDE_CONFIG_DIR'
+        home = native_path((host.projects.parent if host else
+                            Path(args.target_home).expanduser() if args.target_home else agent_home(args.to)).resolve())
+        cwd = args.cwd or session.cwd
+        is_absolute = cwd.startswith('/') if host and host.is_wsl else (Path(cwd).is_absolute() or win_to_wsl_path(cwd))
+        if not cwd or not is_absolute:
+            raise ValueError('destination cwd must be absolute; supply --cwd')
+        reachable = host.root / cwd.lstrip('/') if host and host.is_wsl else Path(cwd)
+        if os.name != 'nt' and win_to_wsl_path(cwd):
+            reachable = Path(win_to_wsl_path(cwd))
+        if not reachable.is_dir():
+            raise ValueError('destination working directory is unavailable; supply a reachable --cwd')
+        sid = str(_uuid.uuid5(TELEPORT_NS, f'{session.agent}:{session.session_id}:{args.to}:{cwd}'))
+        stamp = session.timestamp
+        if args.to == 'codex':
+            target = home / 'sessions' / stamp[:10].replace('-', '/') / f'rollout-{stamp[:19].replace(":", "-")}-{sid}.jsonl'
+            existing = [p for folder in ('sessions', 'archived_sessions')
+                        for p in (home / folder).rglob(f'*{sid}.jsonl')]
+        else:
+            target = home / 'projects' / encode_cwd(cwd) / f'{sid}.jsonl'
+            existing = list((home / 'projects').glob(f'*/{sid}.jsonl'))
+        files = [(target, ''.join(json.dumps(r, ensure_ascii=False) + '\n'
+                                 for r in teleport_rows(session, args.to, sid, cwd)))]
+        tombstone = None
+        if args.desktop_partition:
+            if not (host and host.is_wsl) and home / 'projects' != native_path(PROJECTS_DIR.resolve()):
+                raise ValueError('desktop target must use this machine\'s Claude projects store (or --target-host wsl:NAME)')
+            parts = load_partitions()
+            dst = resolve_partition(parts, args.desktop_partition)
+            c = CliSession(host=host or WINDOWS_HOST, transcript=target, cli_id=sid,
+                           project_dir=target.parent.name, cwd=cwd, origin_cwd=cwd,
+                           title=session_title(session),
+                           created_at=_ms(stamp), last_activity=int(time.time() * 1000))
+            data, _ = build_adopted(c, adopt_template(dst), dst, connector_names(parts))
+            # Never inherit donor approvals, worktrees, or runtime session settings.
+            data.update(alwaysAllowedReasons=[], sessionPermissionUpdates=[], spawnSeed={})
+            if not (host and host.is_wsl):
+                data.pop('wslConfig', None)
+                data.pop('sshRemoteTranscriptPath', None)
+            metadata = dst.path / f'{c.session_id}.json'
+            tombstone = dst.path / f'deleted_{c.uuid}'
+            if tombstone.exists():
+                raise ValueError('destination session has a deletion tombstone')
+            files.append((metadata, json.dumps(data, ensure_ascii=False, indent=2) + '\n'))
+        print(f'{session.agent} -> {args.to}: {len(session.messages)} messages (new independent fork)')
+        print(f'Source: {source}\nDestination: {target}\nSession: {sid}\nWorking directory: {cwd}')
+        for note, count in session.notices.items():
+            print(f'  {count}x {note}')
+        if session.messages[0].role != 'user':
+            print('  Added a labeled import preface for assistant-first history.')
+        print('Project files and source permissions are not copied. Completed tools retain native call/result structure.')
+        # An existing transcript may have been resumed/modified: never replace it
+        # or add metadata to a half-existing import based on assumptions.
+        if existing or any(p.exists() or p.is_symlink() for p, _ in files):
+            if len(files) > 1 and not all(p.is_file() for p, _ in files):
+                raise ValueError('incomplete desktop import: transcript and metadata are not both present; '
+                                 'existing files were preserved. Inspect the destination before retrying')
+            print('Destination already exists; left untouched (including archived imports).')
+            return 0
+        if not args.apply:
+            print('DRY RUN. Nothing written. Re-run with --apply to create this fork.')
+            return 0
+        _publish_teleport(files, tombstone)
+        print(f'Created {sid}. Resume in the target environment:')
+        print(f'  codex resume {sid}' if args.to == 'codex' else f'  claude --resume {sid}')
+        print(f'Run from {cwd}; use the destination {env_key}={home}.')
+        if args.to == 'codex':
+            print('Desktop: use the same CODEX_HOME and host, then refresh/restart the app to discover the session.')
+        elif args.desktop_partition:
+            print('Desktop: switch accounts or restart Claude to reload its session list.')
+        else:
+            print('For Claude desktop visibility, include --desktop-partition on the initial import, or use adopt for WSL.')
+        return 0
+    except (OSError, ValueError) as exc:
+        die(str(exc))
+
+
 def main(argv: list[str] | None = None) -> int:
     fmt = argparse.RawDescriptionHelpFormatter
     ap = argparse.ArgumentParser(
@@ -2213,6 +2962,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     sp.add_argument("-a", "--all", action="store_true", help="include archived sessions")
     sp.add_argument("-n", "--limit", type=int, metavar="N", help="show only the N most recent")
+    sp.add_argument("--agent", choices=("claude", "codex"), help="list transcript paths for cross-client teleport (20 most recent by default)")
+    sp.add_argument("--home", metavar="DIR", help="with --agent: read this .claude/.codex directory")
     origin = sp.add_mutually_exclusive_group()
     origin.add_argument(
         "--cli", action="store_true",
@@ -2290,6 +3041,20 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--to", metavar="HOST", help="destination distro (default: the only one)")
     ep.add_argument("--apply", action="store_true", help="actually write (default is dry run)")
     ep.set_defaults(fn=cmd_eject)
+
+    tp = sub.add_parser(
+        "teleport", help="fork conversation history between Claude and Codex",
+        description="Convert a Claude transcript or Codex rollout into a new resumable session. "
+        "Dry run by default. Tool evidence becomes text; permissions and credentials never transfer.",
+    )
+    tp.add_argument("transcript", help="source Claude JSONL transcript or Codex rollout file")
+    tp.add_argument("--to", required=True, choices=("claude", "codex"))
+    tp.add_argument("--target-home", metavar="DIR", help="target .claude/.codex directory (defaults to the client's environment variable or home)")
+    tp.add_argument("--cwd", help="destination working directory; required if the source path is unavailable")
+    tp.add_argument("--target-host", metavar="HOST", help="Claude destination host, e.g. wsl:Ubuntu (uses that host's .claude)")
+    tp.add_argument("--desktop-partition", metavar="SEL", help="also create Claude desktop metadata, e.g. active")
+    tp.add_argument("--apply", action="store_true", help="actually create the fork (default is dry run)")
+    tp.set_defaults(fn=cmd_teleport)
 
     lp = sub.add_parser(
         "label",
