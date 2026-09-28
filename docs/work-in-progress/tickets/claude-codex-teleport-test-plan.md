@@ -71,3 +71,12 @@ Final interruption correction `57458ed`: Linux 143 passed, Python 3.10 and nativ
   membership is refused; archive and foreign-home inputs are rejected.
 - [x] Inject a failed native metadata endpoint after publication, retain the
   transcript, then repair through the public CLI without duplicate projects.
+
+## Default placement and client boundaries
+
+- [x] Default dry run reports automatic project placement without starting Codex.
+- [x] Missing Codex fails before publication by default; explicit `none` imports
+  the transcript without launching Codex. These regressions failed before the fix.
+- [x] Real create/reuse project probes omit `--codex-project` to exercise the default.
+- [x] Existing native-loader, round-trip, Claude desktop and publication tests
+  pass after separating client encoders, import planning, execution and output.

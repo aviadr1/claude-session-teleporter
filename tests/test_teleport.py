@@ -19,6 +19,8 @@ def journey(request, tmp_path):
     dest = tmp_path / 'destination'
     target = 'codex' if source == 'claude' else 'claude'
     argv = ['teleport', str(path), '--to', target, '--target-home', str(dest)]
+    if target == 'codex':
+        argv += ['--codex-project', 'none']
     return source, path, dest, argv
 
 
@@ -93,7 +95,7 @@ def test_bad_source_fails_without_writes(tmp_path, bad):
     path = tmp_path/'bad.jsonl'; path.write_text(bad)
     dest = tmp_path/'destination'
     with pytest.raises(SystemExit):
-        cs.main(['teleport',str(path),'--to','codex','--target-home',str(dest),'--apply'])
+        cs.main(['teleport',str(path),'--to','codex','--codex-project','none','--target-home',str(dest),'--apply'])
     assert not dest.exists()
 
 
@@ -132,7 +134,7 @@ def test_codex_fork_with_inherited_parent_header(tmp_path):
 def test_archived_codex_import_is_not_resurrected(tmp_path, capsys):
     source = write_rows(tmp_path/'source.jsonl', claude_rows(tmp_path))
     dest = tmp_path/'codex'
-    args = ['teleport', str(source), '--to', 'codex', '--target-home', str(dest), '--apply']
+    args = ['teleport', str(source), '--to', 'codex', '--codex-project', 'none', '--target-home', str(dest), '--apply']
     cs.main(args)
     original = next(dest.rglob('*.jsonl'))
     archived = dest/'archived_sessions'/original.name
@@ -246,7 +248,7 @@ def test_destination_honors_client_environment(tmp_path, monkeypatch):
         monkeypatch.setenv(key,str(dest))
         rows=claude_rows(tmp_path) if source_agent=='claude' else codex_rows(tmp_path)
         source=write_rows(tmp_path/(source_agent+'.jsonl'),rows)
-        cs.main(['teleport',str(source),'--to',target,'--apply'])
+        cs.main(['teleport',str(source),'--to',target,'--apply', *(['--codex-project','none'] if target == 'codex' else [])])
         assert len(list(dest.rglob('*.jsonl')))==1
 
 

@@ -21,12 +21,13 @@ def test_auto_project_prefers_exact_roots_and_rejects_ambiguity(tmp_path):
         cs.select_codex_project([exact], str(root), 'absent')
 
 
-def test_project_dry_run_never_starts_codex_or_creates_home(tmp_path):
+def test_project_dry_run_never_starts_codex_or_creates_home(tmp_path, capsys):
     src = write_rows(tmp_path/'source.jsonl', claude_rows(tmp_path))
     home = tmp_path/'destination'
     assert cs.main(['teleport', str(src), '--to', 'codex', '--target-home', str(home),
-                    '--codex-project', 'auto', '--codex-bin', '/missing/codex']) == 0
+                    '--codex-bin', '/missing/codex']) == 0
     assert not home.exists()
+    assert 'Codex project: auto' in capsys.readouterr().out
 
 
 def test_project_options_are_rejected_for_claude(tmp_path):
@@ -47,7 +48,7 @@ def test_unavailable_codex_fails_before_publishing(tmp_path):
     home = tmp_path/'destination'
     with pytest.raises(SystemExit):
         cs.main(['teleport', str(src), '--to', 'codex', '--target-home', str(home),
-                 '--codex-project', 'auto', '--codex-bin', str(tmp_path/'missing'), '--apply'])
+                 '--codex-bin', str(tmp_path/'missing'), '--apply'])
     assert not home.exists()
 
 
@@ -75,3 +76,11 @@ def test_project_database_environment_tracks_destination(tmp_path, monkeypatch):
     assert 'CODEX_SQLITE_HOME' not in cs.codex_project_environment(other)
     assert cs.codex_project_environment(other, index)['CODEX_SQLITE_HOME'] == index
     assert cs.select_codex_project([project('same', home)], str(cs.native_path(home)), 'auto')['id'] == 'same'
+
+
+def test_explicit_transcript_only_import_needs_no_codex(tmp_path):
+    src = write_rows(tmp_path/'source.jsonl', claude_rows(tmp_path))
+    home = tmp_path/'destination'
+    assert cs.main(['teleport', str(src), '--to', 'codex', '--target-home', str(home),
+                    '--codex-project', 'none', '--codex-bin', str(tmp_path/'missing'), '--apply']) == 0
+    assert len(list(home.rglob('*.jsonl'))) == 1

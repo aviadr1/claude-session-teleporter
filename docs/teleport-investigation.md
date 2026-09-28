@@ -134,8 +134,8 @@ and synthetic real-server probes establish that cwd alone does not assign a
 saved desktop project. `--codex-project auto` now resolves exact destination
 roots or creates a project, registers the destination provider through native
 resume, and verifies membership through `thread/read`. No model turn is sent.
-The explicit project option requires those APIs; file-only imports still work
-without a Codex executable. `codex-project` repairs placement independently.
+Project registration is now the default and requires those APIs; explicit
+`--codex-project none` imports only the transcript without a Codex executable. `codex-project` repairs placement independently.
 
 Unlike the original 0.151 probe, this newer server can index a missing provider
 as an empty string. A filesystem scan discovers the rollout but a provider-filtered
@@ -158,3 +158,24 @@ migration checkpoint was unfinished. Therefore this feature guarantees native
 backend membership, not automatic sidebar grouping on that desktop build.
 Refreshing alone is not a verified remedy. The tool does not rewrite live global
 settings to bypass the app's project handling.
+
+
+## Implementation boundaries
+
+The distributable remains one standard-library Python file. Cross-client code
+has separate layers:
+
+- `decode_claude_session` / `decode_codex_session` understand each source format;
+  `PortableSession` and its validators define the shared conversion contract.
+- `encode_claude_session` / `encode_codex_session` own native destination rows.
+  Tool argument projection is shared without calling a Claude encoder from Codex.
+- `plan_teleport` builds a `TeleportPlan` without writes or client startup.
+  `plan_claude_desktop_metadata` owns Claude's partition/connector integration.
+- `_publish_teleport` owns filesystem transactions. `CodexProjectClient` and
+  `assign_codex_project` own Codex RPC and membership. `apply_teleport` coordinates
+  those effects; CLI functions handle presentation and error reporting.
+
+Existing CLI, round-trip, publication-failure, desktop, and real-client tests
+exercise these boundaries. The default project tests omit the project option;
+transcript-only test journeys explicitly opt out so CI remains independent of
+installed client executables.

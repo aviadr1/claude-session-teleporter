@@ -61,7 +61,9 @@ def tool_rows(agent, cwd):
 
 
 def teleport(source, target, home):
-    assert cs.main(['teleport',str(source),'--to',target,'--target-home',str(home),'--apply']) == 0
+    # Transcript-format journeys are independent of the installed Codex binary.
+    placement = ['--codex-project', 'none'] if target == 'codex' else []
+    assert cs.main(['teleport',str(source),'--to',target,'--target-home',str(home),'--apply', *placement]) == 0
     files = list(home.rglob('*.jsonl'))
     assert len(files) == 1
     return files[0]

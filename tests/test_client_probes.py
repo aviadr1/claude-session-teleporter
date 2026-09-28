@@ -185,7 +185,7 @@ def test_real_codex_discovery_read_resume_and_model_context(tmp_path, assistant_
         rows[0]['parentUuid'] = None
     source = write_rows(tmp_path/'claude.jsonl', rows)
     home = tmp_path/'codex'
-    assert cs.main(['teleport', str(source), '--to', 'codex', '--target-home', str(home), '--apply']) == 0
+    assert cs.main(['teleport', str(source), '--to', 'codex', '--codex-project', 'none', '--target-home', str(home), '--apply']) == 0
     imported = cs.read_portable_session(next(home.rglob('*.jsonl')))
     with capture_api() as (url, requests):
         for restart in range(2):
@@ -325,7 +325,7 @@ def test_real_codex_project_import_and_repair(tmp_path, monkeypatch, existing):
                 original = rpc('project/create', {'idempotencyKey': 'existing', 'name': 'Existing repo',
                                                   'roots': [{'path': str(cwd)}]})['project']
         argv = ['teleport', str(source), '--to', 'codex', '--target-home', str(home),
-                '--codex-bin', binary, '--codex-project', 'auto', '--apply']
+                '--codex-bin', binary, '--apply']
         assert cs.main(argv) == 0
         rollout = next((home/'sessions').rglob('*.jsonl'))
         sid = cs.read_portable_session(rollout).session_id

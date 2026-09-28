@@ -364,7 +364,7 @@ The metadata is regenerated, not recursively nested. Synthetic discovery
 prefaces are removed on read and regenerated once when necessary.
 
 Enforcement: `with_teleport_metadata`, `restore_teleport_metadata`,
-`validate_portable_message`, `validate_portable_tools`, `_claude_portable`.
+`validate_portable_message`, `validate_portable_tools`, `decode_claude_session`.
 Native sessions remain independently readable if metadata is removed, but
 format-specific fidelity can decrease. Session IDs and message envelopes change
 for every fork; this is semantic round-trip preservation, not byte identity.
@@ -391,7 +391,9 @@ metadata restoration still verifies agreement with the native projection.
 
 ### T8 — Codex desktop project placement uses destination-owned membership
 
-`--codex-project auto` and `codex-project` use native project APIs. Selection
+Codex imports default to `--codex-project auto`; `codex-project` repairs existing
+imports through native project APIs. Only explicit `--codex-project none` skips
+project registration. Claude destinations do not start a Codex process. Selection
 matches exact roots (including secondary roots), never ambiguous parents;
 duplicate matches require an explicit ID. An unmatched folder gets a project
 with a deterministic creation key. An assigned chat cannot be moved implicitly.

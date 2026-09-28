@@ -63,8 +63,8 @@ claude-sessions sessions --agent codex -n 10
 claude-sessions teleport /path/to/claude-session.jsonl --to codex
 claude-sessions teleport /path/to/claude-session.jsonl --to codex --apply
 
-# Claude -> Codex desktop, preserving project placement
-claude-sessions teleport /path/to/claude-session.jsonl --to codex --codex-project auto --apply
+# Transcript-only Codex import, without launching Codex or assigning a project
+claude-sessions teleport /path/to/claude-session.jsonl --to codex --codex-project none --apply
 
 # Codex -> Claude CLI
 claude-sessions teleport /path/to/rollout.jsonl --to claude --apply
@@ -89,14 +89,16 @@ rollouts). Windows and WSL stores are separate. When their path spellings
 differ, supply `--cwd` in the destination's syntax; the working tree must
 already exist. The tool does not move files or rewrite paths inside messages.
 
-For Codex desktop **project membership**, add `--codex-project auto`. The tool
+Codex imports **default to `--codex-project auto`** for project membership. The tool
 reuses a project with an exact working-directory root or creates one for that
 folder. It never guesses from a parent folder; multiple exact matches require
 `--codex-project ID` (or a unique project name). This uses Codex's native project
 APIs and registers the destination provider without sending a model prompt.
 A recent Codex executable with project APIs is required; use `--codex-bin PATH`
-for the desktop-bundled executable if your CLI is older. Without this option,
-imports remain independent of the Codex executable and preserve the cwd only.
+for the desktop-bundled executable if your CLI is older. To import only the
+transcript without a Codex executable, explicitly use `--codex-project none`;
+this preserves the cwd but skips project membership. Codex → Claude imports
+do not start Codex or resolve Codex projects.
 
 To assign an already imported session without reimporting its conversation:
 
