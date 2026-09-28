@@ -211,7 +211,7 @@ export const AppMock: React.FC<AppProps> = (a) => {
               {a.org[0].toUpperCase()}
             </div>
             <div style={{flex: 1}}>
-              <div style={{fontSize: 13, color: C.muted}}>org</div>
+              <div style={{fontSize: 13, color: C.muted}}>subscription</div>
               <div style={{fontSize: 18, fontWeight: 600, color: C.text}}>{a.org}</div>
             </div>
             <div style={{color: C.muted, fontSize: 16}}>▾</div>

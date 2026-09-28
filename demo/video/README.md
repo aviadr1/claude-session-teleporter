@@ -1,6 +1,6 @@
 # Promo video
 
-A 29-second, 1920×1080, 30 fps promo for claude-session-teleporter, built with
+A 31-second, 1920×1080, 30 fps promo for claude-session-teleporter, built with
 [Remotion](https://www.remotion.dev/) (videos written as React components).
 The rendered files are committed at `docs/teleporter-demo.mp4` and
 `docs/teleporter-demo-preview.gif`.
@@ -32,6 +32,15 @@ position and how much of a line has appeared so far. It never changes a
 character. The captions, the end card and the stylised app window are
 illustration, not tool output.
 
+The story is the fixture's: one login (account `1eb44d48`) that belongs to two
+orgs, `work` and `personal`, each on its own plan. That is what the video calls
+two subscriptions. It does not show copying between different logins.
+
+A badge in the bottom-right corner of every frame carries the tool's name, the
+repo URL and a QR code for `https://github.com/aviadr1/claude-session-teleporter`.
+The `qrcode` npm package generates the QR at build time, and on the end card the
+badge grows into the middle of the frame.
+
 The fixture's timestamps are relative to when you run it, so regenerating
 changes the dates on screen and nothing else.
 
@@ -59,7 +68,8 @@ needs a full `ffmpeg` on `PATH`, because the ffmpeg bundled with Remotion lacks
 | `capture/` | fixture builder and capture script |
 | `src/captures/` | captured tool output (generated, committed) |
 | `src/captures.ts` | loads the captures and finds the lines each scene uses |
-| `src/scenes/` | the five scenes: the pain, `partitions`, the dry run, `--apply`, the end card |
+| `src/scenes/` | the six scenes: the setup (one login, two subscriptions), the problem, `partitions`, the dry run, `--apply`, the end card |
+| `src/components/Badge.tsx` | the name, URL and QR badge shown in every frame |
 | `src/components/` | terminal, stylised app window, captions, background |
 
 Fonts: JetBrains Mono NL (the full build, because the Google Fonts subsets lack

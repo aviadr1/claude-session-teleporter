@@ -19,7 +19,8 @@ export const FPS = 30;
 
 /** Frames per scene, before transitions overlap them. */
 export const SCENES = {
-  pain: 170,
+  setup: 105,
+  pain: 150,
   partitions: 140,
   dryRun: 225,
   apply: 245,

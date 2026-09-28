@@ -14,8 +14,9 @@ import {Caption} from '../components/Caption';
 import {Colorized} from '../components/colorize';
 import {lineHeight, PAD, Terminal} from '../components/Terminal';
 import {C} from '../theme';
+import {SAFE_BOTTOM} from '../layout';
 
-const T = {x: 160, y: 196, w: 1600, h: 850, fontSize: 24};
+const T = {x: 160, y: 196, w: 1600, h: SAFE_BOTTOM - 196, fontSize: 24};
 const rows = Math.floor((T.h - 44 - PAD * 2) / lineHeight(T.fontSize));
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 
@@ -82,11 +83,11 @@ export const DryRun: React.FC = () => {
   const scroll = spring({frame: f - (REST + 6), fps, config: {damping: 22, stiffness: 70}}) * target;
   return (
     <AbsoluteFill>
-      <Caption kicker={`$ ${CMD.dryRun}`} to={118}>
-        A dry run shows the plan. Nothing is written.
+      <Caption kicker={`$ ${CMD.dryRun}`} to={118} size={52}>
+        Teleport them to your other subscription. Dry run first.
       </Caption>
-      <Caption kicker="the part a plain cp gets wrong" from={120} accent={C.amber}>
-        Connector IDs differ per org. It fixes them.
+      <Caption kicker="the part a plain cp gets wrong" from={120} accent={C.amber} size={52}>
+        Connector IDs differ per subscription. It remaps them.
       </Caption>
       <Terminal
         {...T}

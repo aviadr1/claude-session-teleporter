@@ -17,9 +17,10 @@ import {Caption} from '../components/Caption';
 import {lineHeight, outputLineY, PAD, Terminal} from '../components/Terminal';
 import {AGE} from '../appData';
 import {C} from '../theme';
+import {SAFE_BOTTOM} from '../layout';
 
-const APP = {x: 60, y: 200, w: 720, h: 820};
-const T = {x: 820, y: 200, w: 1040, h: 820, fontSize: 17};
+const APP = {x: 60, y: 196, w: 720, h: SAFE_BOTTOM - 196};
+const T = {x: 820, y: 196, w: 1040, h: SAFE_BOTTOM - 196, fontSize: 17};
 const rows = Math.floor((T.h - 44 - PAD * 2) / lineHeight(T.fontSize));
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 
@@ -102,11 +103,11 @@ export const Apply: React.FC = () => {
 
   return (
     <AbsoluteFill>
-      <Caption kicker={`$ ${CMD.apply}`} to={126}>
-        Apply it. They land in the org you're in.
+      <Caption kicker={`$ ${CMD.apply}`} to={126} size={54}>
+        Apply. They land in the subscription with quota left.
       </Caption>
       <Caption kicker="then switch accounts once in the app" from={128} accent={C.green}>
-        The list reloads, and there they are.
+        Same sessions, now on your personal plan.
       </Caption>
       <AppMock {...APP} org={org} quota={88} items={[]} activeTitle={personalTitleBefore} flash={flash} />
       <div style={{position: 'absolute', left: blogPos.x, top: blogPos.y}}>

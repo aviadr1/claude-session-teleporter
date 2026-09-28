@@ -5,14 +5,15 @@ import {AppMock, appMenuRow, appSlot, appSwitcher, Cursor} from '../components/A
 import {Caption} from '../components/Caption';
 import {AGE} from '../appData';
 import {C} from '../theme';
+import {SAFE_BOTTOM} from '../layout';
 
-const APP = {x: 260, y: 210, w: 1400, h: 810};
+const APP = {x: 260, y: 196, w: 1400, h: SAFE_BOTTOM - 196};
 const ORGS = ['work', 'personal'];
 const pct = (cell: string) => Number(/(\d+)%$/.exec(cell)?.[1]);
 const WORK_QUOTA = pct(work[7]);
 const PERSONAL_QUOTA = pct(personal[7]);
 
-const SWITCH = 110; // the frame the org flips
+const SWITCH = 72; // the frame the org flips
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 
 const lerpPt = (a: {x: number; y: number}, b: {x: number; y: number}, t: number) => ({
@@ -60,20 +61,20 @@ export const Pain: React.FC = () => {
   const enter = spring({frame: f, fps, config: {damping: 18}});
   const switched = f >= SWITCH;
 
-  const drain = interpolate(f, [8, 62], [31, WORK_QUOTA], clamp);
+  const drain = interpolate(f, [0, 16], [6, WORK_QUOTA], clamp);
   const refill = interpolate(f, [SWITCH, SWITCH + 26], [WORK_QUOTA, PERSONAL_QUOTA], clamp);
   const quota = switched ? refill : drain;
 
   // cursor: drift to the switcher, open it, pick personal
-  const home = {x: 1500, y: 880};
+  const home = {x: 1200, y: 700};
   const sw = appSwitcher(APP);
   const row = appMenuRow(APP, 1, ORGS.length);
-  const toSwitcher = spring({frame: f - 52, fps, config: {damping: 20, stiffness: 90}});
-  const toRow = spring({frame: f - 92, fps, config: {damping: 20, stiffness: 120}});
-  const cur = f < 92 ? lerpPt(home, sw, toSwitcher) : lerpPt(sw, row, toRow);
+  const toSwitcher = spring({frame: f - 12, fps, config: {damping: 20, stiffness: 90}});
+  const toRow = spring({frame: f - 54, fps, config: {damping: 20, stiffness: 120}});
+  const cur = f < 54 ? lerpPt(home, sw, toSwitcher) : lerpPt(sw, row, toRow);
   const press =
-    interpolate(f, [80, 83, 87], [0, 1, 0], clamp) + interpolate(f, [SWITCH - 4, SWITCH - 1, SWITCH + 3], [0, 1, 0], clamp);
-  const menuOpen = f >= 84 && f < SWITCH ? spring({frame: f - 84, fps, config: {damping: 16}}) : 0;
+    interpolate(f, [42, 45, 49], [0, 1, 0], clamp) + interpolate(f, [SWITCH - 4, SWITCH - 1, SWITCH + 3], [0, 1, 0], clamp);
+  const menuOpen = f >= 46 && f < SWITCH ? spring({frame: f - 46, fps, config: {damping: 16}}) : 0;
 
   const items = switched
     ? [
@@ -129,11 +130,11 @@ export const Pain: React.FC = () => {
 
   return (
     <AbsoluteFill>
-      <Caption kicker="the problem" to={98} accent={C.red}>
-        {`Your work org is down to ${WORK_QUOTA}% quota.`}
+      <Caption kicker="the problem" to={SWITCH - 2} accent={C.red}>
+        {`Work hits ${WORK_QUOTA}% mid-task.`}
       </Caption>
-      <Caption kicker="so you switch orgs" from={100} accent={C.violet}>
-        …and your sessions vanish.
+      <Caption kicker="so you switch to personal" from={SWITCH} accent={C.violet}>
+        …and your work sessions aren't there.
       </Caption>
       <div style={{position: 'absolute', inset: 0, opacity: enter, transform: `scale(${0.96 + enter * 0.04})`}}>
         <AppMock
@@ -164,7 +165,7 @@ export const Pain: React.FC = () => {
             }}
           />
         ) : null}
-        {f > 40 && f < SWITCH + 20 ? (
+        {f < SWITCH + 20 ? (
           <Cursor x={cur.x} y={cur.y} press={Math.min(1, press)} />
         ) : null}
       </div>

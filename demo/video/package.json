@@ -17,11 +17,13 @@
     "@remotion/fonts": "4.0.529",
     "@remotion/transitions": "4.0.529",
     "jetbrains-mono": "1.0.6",
+    "qrcode": "1.5.4",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "remotion": "4.0.529"
   },
   "devDependencies": {
+    "@types/qrcode": "1.5.6",
     "@types/react": "19.3.0",
     "typescript": "7.0.2"
   }

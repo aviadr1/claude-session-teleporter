@@ -39,7 +39,7 @@ export const Partitions: React.FC = () => {
   const quotaOf = (cell: string) => /(\d+%)$/.exec(cell)?.[1];
   return (
     <AbsoluteFill>
-      <Caption kicker={`$ ${CMD.partitions}`}>They're not gone. They're under the other org.</Caption>
+      <Caption kicker={`$ ${CMD.partitions}`} size={54}>They're not gone. They're in your other subscription.</Caption>
       <Terminal
         x={40}
         y={270}
@@ -61,13 +61,13 @@ export const Partitions: React.FC = () => {
         <Chip
           from={62}
           color={C.red}
-          title={wName}
+          title={`${wName} · your company's plan`}
           lines={[`${wUnarch} sessions you can't see`, `${quotaOf(wQuota)} quota left`]}
         />
         <Chip
           from={72}
           color={C.green}
-          title={`● ${pName}  (signed in)`}
+          title={`● ${pName} · your plan, signed in`}
           lines={[`${pAll} session in the app`, `${quotaOf(pQuota)} quota left`]}
         />
       </div>

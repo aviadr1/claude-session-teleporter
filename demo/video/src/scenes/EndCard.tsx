@@ -3,7 +3,6 @@ import {AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig} from
 import {MONO, SANS} from '../fonts';
 import {C} from '../theme';
 
-const REPO = 'github.com/aviadr1/claude-session-teleporter';
 const INSTALL = 'uv tool install claude-session-teleporter';
 
 const Rings: React.FC = () => {
@@ -38,13 +37,12 @@ export const EndCard: React.FC = () => {
   const a = pop(16);
   const b = pop(32);
   const c = pop(46);
-  const d = pop(58);
   const typed = Math.floor(interpolate(f, [50, 50 + INSTALL.length / 1.8], [0, INSTALL.length], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}));
 
   return (
     <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center'}}>
       <Rings />
-      <div style={{textAlign: 'center', marginTop: -40}}>
+      <div style={{position: 'absolute', top: 150, left: 0, right: 0, textAlign: 'center'}}>
         <div
           style={{
             fontFamily: SANS,
@@ -86,9 +84,20 @@ export const EndCard: React.FC = () => {
         </div>
         <div
           style={{
+            fontFamily: SANS,
+            fontSize: 30,
+            color: C.text,
+            marginTop: 16,
+            opacity: b,
+          }}
+        >
+          Teleport Claude Code sessions between your subscriptions.
+        </div>
+        <div
+          style={{
             display: 'inline-flex',
             alignItems: 'center',
-            marginTop: 64,
+            marginTop: 44,
             padding: '22px 36px',
             borderRadius: 18,
             background: C.panel,
@@ -105,18 +114,6 @@ export const EndCard: React.FC = () => {
           <span style={{color: C.prompt, fontWeight: 700}}>$ </span>
           {INSTALL.slice(0, typed)}
           <span style={{color: 'transparent'}}>{INSTALL.slice(typed)}</span>
-        </div>
-        <div
-          style={{
-            fontFamily: MONO,
-            fontSize: 34,
-            color: C.cyan,
-            marginTop: 40,
-            opacity: d,
-            transform: `translateY(${(1 - d) * 20}px)`,
-          }}
-        >
-          {REPO}
         </div>
       </div>
     </AbsoluteFill>
