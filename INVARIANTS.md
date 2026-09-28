@@ -29,7 +29,7 @@ never to make it untrue.
 
 ### S1 - No write command writes anything without `--apply`
 
-`copy`, `adopt` and `eject` are dry runs by default. A dry run prints its plan
+`copy`, `adopt`, `eject` and `teleport` are dry runs by default. A dry run prints its plan
 and touches nothing: no metadata, no transcript, no ledger.
 
 > `test_dry_run_writes_nothing[copy]`, `[adopt]`, `[eject]`
@@ -98,7 +98,7 @@ tool approval.
 
 > `test_adopt_resets_permission_mode`
 
-### S11 - `eject` is the only command that forks, and it says so
+### S11 - `eject` and `teleport` fork, and say so
 
 `eject` writes a second transcript; the Windows session keeps its own. It uses
 exclusive create too, and refuses a destination that already exists rather than
@@ -275,3 +275,52 @@ is no store, so CI stays green on a bare runner.
 
 If Anthropic changes a format, that file fails first - before anyone points the
 tool at their sessions.
+
+
+## Cross-client teleport
+
+### T1 — Dry runs never write; imports never change the source or an existing fork
+
+The ID is derived from the source client/ID and destination client/cwd. Repeats
+never append newer source messages to a destination that may have evolved.
+Archived Codex imports and Claude desktop tombstones remain respected.
+
+> `test_teleport_dry_run_apply_and_repeat`,
+> `test_archived_codex_import_is_not_resurrected`,
+> `test_desktop_tombstone_blocks_import`
+
+### T2 — Preserve active conversation order without replaying foreign tools
+
+Claude follows its last main parent chain; Codex uses replacement context after
+compaction. Tool evidence is text. Reasoning and source instructions/permissions
+are omitted; unsupported media gets an explicit placeholder and notice.
+
+> `test_claude_follows_latest_branch_not_siblings`,
+> `test_codex_compaction_uses_replacement_context`,
+> `test_codex_fork_with_inherited_parent_header`,
+> `test_tools_are_text_and_private_reasoning_is_omitted`,
+> `test_images_get_visible_placeholder_and_notice`,
+> `test_source_permissions_and_instructions_never_transfer`
+
+### T3 — Invalid or unsupported input fails before publication
+
+No guessed history for malformed JSON, orphaned Claude branches, Codex
+rollbacks or summary-only compactions. Publish complete files without replacing
+concurrent writers; roll back our own files on a multi-file failure.
+
+> `test_bad_source_fails_without_writes`, `test_missing_branch_parent_fails`,
+> `test_refused_import_does_not_create_destination`,
+> `test_publish_failure_rolls_back_only_our_files`
+
+### T4 — Desktop history and destination placement must match the imported transcript
+
+Codex needs model response items AND display events. Claude metadata points to
+the native or WSL transcript and inherits only destination connector settings,
+with donor permissions reset. Actual GUI interaction remains unverified; the
+Codex backend and both CLI loaders are exercised by opt-in binary probes.
+
+> `test_codex_has_both_model_history_and_desktop_history`,
+> `test_desktop_metadata_uses_destination_and_resets_permissions`,
+> `test_wsl_desktop_points_at_imported_transcript`,
+> `test_real_codex_discovery_read_resume_and_model_context`,
+> `test_real_claude_resume_model_context`
