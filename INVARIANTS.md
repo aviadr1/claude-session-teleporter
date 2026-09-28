@@ -291,15 +291,17 @@ Archived Codex imports and Claude desktop tombstones remain respected.
 
 ### T2 — Preserve active conversation order without replaying foreign tools
 
-Claude follows its last main parent chain; Codex uses replacement context after
-compaction. Tool evidence is labeled assistant text, never a new user instruction.
+Claude follows its last main parent chain plus results explicitly linked to its
+parallel calls; Codex uses replacement context after compaction. Tools stay native
+call/result records, preserving their authority and IDs. Incomplete or ambiguous
+pairs fail before writing. Imported calls are completed history, never replayed.
 Reasoning and source instructions/permissions
 are omitted; unsupported media gets an explicit placeholder and notice.
 
 > `test_claude_follows_latest_branch_not_siblings`,
 > `test_codex_compaction_uses_replacement_context`,
 > `test_codex_fork_with_inherited_parent_header`,
-> `test_tools_are_text_and_private_reasoning_is_omitted`,
+> `test_tools_are_structured_and_private_reasoning_is_omitted`,
 > `test_images_get_visible_placeholder_and_notice`,
 > `test_source_permissions_and_instructions_never_transfer`
 
@@ -346,3 +348,26 @@ Adversarial coverage for T2/T3 additionally includes:
 `test_failed_desktop_publication_preserves_replaced_transcript`,
 `test_cleanup_preserves_a_consumers_changes`, and
 `test_retry_of_partial_desktop_import_is_not_reported_successful`.
+
+
+### T6 — Supported conversation content survives both round trips
+
+`PortableMessage` is the shared text/tool model for both readers and writers.
+`validate_portable_tools` enforces complete, unique exchanges. Each generated
+native record has versioned conversion metadata, bound to its projection by a
+SHA-256 digest. Restoration validates the metadata shape and reprojects it to
+ensure it agrees with the native record; edited native content takes precedence.
+Only portable content is retained, never source permissions or private reasoning.
+The metadata is regenerated, not recursively nested. Synthetic discovery
+prefaces are removed on read and regenerated once when necessary.
+
+Enforcement: `with_teleport_metadata`, `restore_teleport_metadata`,
+`validate_portable_message`, `validate_portable_tools`, `_claude_portable`.
+Native sessions remain independently readable if metadata is removed, but
+format-specific fidelity can decrease. Session IDs and message envelopes change
+for every fork; this is semantic round-trip preservation, not byte identity.
+
+> `tests/test_native_tools.py` — repeated CLI round trips, stale/contradictory
+> metadata, parallel sibling results, incomplete/duplicate pairs, malformed IDs,
+> and nonaccumulating prefaces. Both successful real-client continuation probes
+> also teleport back and compare the original conversation content.

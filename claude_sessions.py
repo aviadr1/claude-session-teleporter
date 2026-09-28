@@ -67,6 +67,7 @@ source host: adopt only writes desktop metadata, eject only writes into WSL.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -76,7 +77,7 @@ import sys
 import time
 import tempfile
 import uuid as _uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -595,6 +596,12 @@ def _ms(iso: str) -> int:
         return 0
 
 
+def transcript_cwd(cwds: list[str], project_dir: str) -> str:
+    """F2/F3: the store directory distinguishes a moved project from a visit."""
+    return next((cwd for cwd in reversed(cwds) if encode_cwd(cwd) == project_dir),
+                cwds[-1] if cwds else '')
+
+
 def read_cli_session(host: Host, path: Path, deep: bool = True) -> CliSession | None:
     """
     Reconstruct a CliSession from a transcript.
@@ -662,9 +669,7 @@ def read_cli_session(host: Host, path: Path, deep: bool = True) -> CliSession | 
     # the directory names the CURRENT cwd. Prefer the cwd that agrees with it,
     # and keep the first one as the origin - the same split the app itself makes.
     sess.origin_cwd = cwds[0]
-    sess.cwd = next(
-        (c for c in reversed(cwds) if encode_cwd(c) == sess.project_dir), cwds[-1]
-    )
+    sess.cwd = transcript_cwd(cwds, sess.project_dir)
     # visiting a subdirectory and coming back is not a move; ending up somewhere
     # else is - that is the case worth telling the user about
     sess.moved = sess.origin_cwd != sess.cwd
@@ -1797,10 +1802,11 @@ Dry-run first; `--apply` creates an independent fork. For Claude desktop include
 `--desktop-partition active` on the initial import. For another store use
 `--target-home`; for another working directory use `--cwd`.
 
-Inspect the conversion notices: tool evidence becomes historical text, private
-reasoning and source instructions are omitted, and unsupported media gets
-placeholders. Compacted sessions transfer active summary/context. Never promise
-lossless transfer of all historical turns, files, permissions or running tools.
+Inspect the conversion notices: completed tools retain native call/result
+structure; pending or ambiguous exchanges are rejected. Both round trips retain
+supported content using checked conversion metadata. Private reasoning and source
+instructions are omitted; unsupported media gets placeholders. Compacted sessions
+transfer active context, not every historical turn, file or running process.
 Resume the printed ID with the destination CLI or refresh the desktop app.
 
 ## Guarantees
@@ -2207,12 +2213,18 @@ this one does fork:
 # ---------------------------------------------------------------------------
 
 TELEPORT_NS = _uuid.UUID('0daa8b13-5778-4cb5-8af4-7fa391f6b0dd')
+IMPORT_PREFACE = '[Import context] Imported conversation history follows.'
 
 
 @dataclass
 class PortableMessage:
     role: str
-    text: str
+    text: str = ''
+    # Calls/results use Responses item shapes as the shared representation.
+    # Claude's error flag is retained separately from the native Codex payload.
+    tool: dict | None = None
+    phase: str | None = None
+    synthetic: bool = False
 
 
 @dataclass
@@ -2263,7 +2275,7 @@ def cmd_agent_sessions(args) -> int:
             except ValueError as exc:
                 print(f'Unavailable: {path}\n  {exc}')
                 continue
-            print(f'{session.agent} {session.session_id}  {trunc(session.messages[0].text.splitlines()[0], 70)}')
+            print(f'{session.agent} {session.session_id}  {session_title(session)}')
             print(f'  cwd: {session.cwd}\n  transcript: {path}')
         if not files:
             print(f'No {args.agent} transcripts found under {home}.')
@@ -2273,7 +2285,7 @@ def cmd_agent_sessions(args) -> int:
 
 
 def portable_text(content, session: PortableSession) -> str:
-    """Tools become inert evidence. Private reasoning and binary data never cross."""
+    """Text-only projection for previews and unsupported media placeholders."""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -2289,47 +2301,179 @@ def portable_text(content, session: PortableSession) -> str:
             out.append(block['text'])
         elif kind in ('thinking', 'redacted_thinking', 'reasoning', 'encrypted_content'):
             session.note('private reasoning omitted')
-        elif kind == 'tool_use':
-            session.note('tool calls/results rendered as historical text')
-            out.append('[Historical tool call ' + str(block.get('name', 'unknown')) +
-                       ' / ' + str(block.get('id', 'unknown')) + ']\n' +
-                       json.dumps(block.get('input'), ensure_ascii=False))
-        elif kind == 'tool_result':
-            session.note('tool calls/results rendered as historical text')
-            out.append('[Historical tool result ' + str(block.get('tool_use_id', 'unknown')) +
-                       ('; error' if block.get('is_error') else '') + ']\n' +
-                       portable_text(block.get('content', ''), session))
         else:
             session.note(f'{kind} content omitted (placeholder retained)')
             out.append(f'[Imported {kind} content unavailable; consult the original session.]')
     return '\n'.join(out)
 
 
-def append_portable_content(session: PortableSession, role: str, content) -> None:
-    """Preserve block order without upgrading tool evidence to user authority."""
+def portable_output(value, session: PortableSession):
+    """Keep text result arrays structured; translate their block vocabulary once."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise ValueError('unsupported tool output shape')
+    return [dict(type='input_text', text=portable_text([block], session)) for block in value]
+
+
+def append_portable_content(session: PortableSession, role: str, content, phase=None) -> None:
+    if isinstance(content, str):
+        content = [dict(type='text', text=content)]
     if not isinstance(content, list):
-        text = portable_text(content, session)
-        if text:
-            session.messages.append(PortableMessage(role, text))
-        return
-    parts, current_role = [], role
+        raise ValueError('unsupported message content shape')
     for block in content:
-        text = portable_text([block], session)
-        if not text:
+        if not isinstance(block, dict):
+            raise ValueError('invalid content block')
+        kind = block.get('type')
+        if kind == 'tool_use':
+            if role != 'assistant' or not isinstance(block.get('input'), dict):
+                raise ValueError('invalid Claude tool call')
+            session.messages.append(PortableMessage('assistant', tool=dict(
+                type='function_call', call_id=block.get('id'), name=block.get('name'),
+                arguments=json.dumps(block['input'], ensure_ascii=False))))
+        elif kind == 'tool_result':
+            if role != 'user':
+                raise ValueError('invalid Claude tool result role')
+            tool = dict(type='function_call_output', call_id=block.get('tool_use_id'),
+                        output=portable_output(block.get('content', ''), session))
+            if 'is_error' in block:
+                tool['is_error'] = block['is_error']
+            session.messages.append(PortableMessage('tool', tool=tool))
+        else:
+            text = portable_text([block], session)
+            if text:
+                session.messages.append(PortableMessage(role, text, phase=phase))
+
+
+def projection_digest(payload: dict) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                    separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def with_teleport_metadata(row: dict, payload: dict, messages: list[PortableMessage]) -> dict:
+    # T6: the native projection is usable independently; conversion metadata
+    # restores format-only distinctions without nesting prior import envelopes.
+    row['teleporter'] = dict(version=1, digest=projection_digest(payload),
+                             items=[asdict(message) for message in messages])
+    return row
+
+
+def restore_teleport_metadata(row: dict, payload: dict, session: PortableSession) -> bool:
+    data = row.get('teleporter')
+    if data is None:
+        return False
+    if not isinstance(data, dict) or data.get('version') != 1 or data.get('digest') != projection_digest(payload):
+        session.note('stale or unknown conversion metadata ignored; native history used')
+        return False
+    try:
+        items = [PortableMessage(**item) for item in data['items']]
+    except (KeyError, TypeError):
+        raise ValueError('invalid conversion metadata') from None
+    try:
+        for item in items:
+            validate_portable_message(item)
+        if row['type'] == 'response_item':
+            projected = codex_item(items[0]) if len(items) == 1 else None
+        else:
+            roles = {'user' if item.role == 'tool' else item.role for item in items}
+            projected = dict(role=next(iter(roles)), content=[claude_block(item) for item in items]) if len(roles) == 1 else None
+        if projected != payload:
+            raise ValueError('conversion metadata contradicts native history')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'invalid conversion metadata: {exc}') from None
+    session.messages.extend(item for item in items if not item.synthetic)
+    return True
+
+
+def validate_portable_message(message: PortableMessage) -> None:
+    if message.role not in ('user', 'assistant', 'tool') or not isinstance(message.text, str):
+        raise ValueError('invalid portable message')
+    if message.phase not in (None, 'commentary', 'final_answer'):
+        raise ValueError('unsupported assistant phase')
+    if not isinstance(message.synthetic, bool) or (message.synthetic and (
+        message.role != 'user' or message.text != IMPORT_PREFACE or message.tool is not None
+    )):
+        raise ValueError('invalid synthetic import preface')
+    tool = message.tool
+    if tool is None:
+        if message.role == 'tool':
+            raise ValueError('tool result is missing its payload')
+        return
+    if not isinstance(tool, dict) or not isinstance(tool.get('call_id'), str) or not tool['call_id']:
+        raise ValueError('tool call/result is missing its call ID')
+    if message.text or message.phase is not None:
+        raise ValueError('tool payload cannot also carry message text or phase')
+    if tool.keys() - {'type', 'call_id', 'name', 'namespace', 'arguments', 'input', 'output', 'is_error'}:
+        raise ValueError('unsupported portable tool fields')
+    if tool.get('namespace') is not None and not isinstance(tool['namespace'], str):
+        raise ValueError('invalid tool namespace')
+    kind = tool.get('type')
+    if kind in ('function_call', 'custom_tool_call'):
+        key = 'arguments' if kind == 'function_call' else 'input'
+        if message.role != 'assistant' or not isinstance(tool.get('name'), str) or not tool['name']:
+            raise ValueError('invalid tool call name or role')
+        if not isinstance(tool.get(key), str):
+            raise ValueError('invalid tool call input')
+    elif kind in ('function_call_output', 'custom_tool_call_output'):
+        output = tool.get('output')
+        if message.role != 'tool' or not isinstance(output, (str, list)):
+            raise ValueError('invalid tool output')
+        if isinstance(output, list) and any(not isinstance(block, dict) or
+                block.get('type') != 'input_text' or not isinstance(block.get('text'), str) or
+                block.keys() != {'type', 'text'} for block in output):
+            raise ValueError('invalid tool output block')
+        if 'is_error' in tool and not isinstance(tool['is_error'], bool):
+            raise ValueError('invalid tool error flag')
+    else:
+        raise ValueError('unsupported portable tool item')
+
+
+def validate_portable_tools(session: PortableSession) -> None:
+    """T2/T6: only complete, unambiguous historical exchanges may cross clients."""
+    calls, completed = {}, set()
+    for message in session.messages:
+        validate_portable_message(message)
+        tool = message.tool
+        if tool is None:
             continue
-        block_role = 'assistant' if block.get('type') in ('tool_result', 'tool_use') else role
-        if parts and block_role != current_role:
-            session.messages.append(PortableMessage(current_role, '\n'.join(parts)))
-            parts = []
-        current_role = block_role
-        parts.append(text)
-    if parts:
-        session.messages.append(PortableMessage(current_role, '\n'.join(parts)))
+        kind, call_id = tool['type'], tool['call_id']
+        if kind in ('function_call', 'custom_tool_call'):
+            if call_id in calls:
+                raise ValueError('duplicate tool call ID')
+            calls[call_id] = kind
+        else:
+            if calls.get(call_id) != kind.removesuffix('_output'):
+                raise ValueError('orphan or mismatched tool result; export a complete exchange')
+            if call_id in completed:
+                raise ValueError('duplicate tool result ID')
+            completed.add(call_id)
+    if calls.keys() != completed:
+        raise ValueError('pending tool call; finish the source turn before teleporting')
+
+
+def session_title(session: PortableSession) -> str:
+    return next((m.text.splitlines()[0] for m in session.messages if m.text.strip()), 'Imported tool history')[:70]
 
 
 def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
     # Follow the last main-chain leaf, including non-message parent nodes. File
     # order alone can replay abandoned branches or subagents as user history.
+    for rec in records:
+        for key in ('uuid', 'parentUuid', 'sourceToolAssistantUUID'):
+            if rec.get(key) is not None and not isinstance(rec[key], str):
+                raise ValueError(f'invalid Claude {key}')
+        if rec.get('type') not in ('user', 'assistant'):
+            continue
+        message = rec.get('message')
+        if not isinstance(message, dict):
+            raise ValueError('invalid Claude message')
+        content = message.get('content')
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') in ('tool_use', 'tool_result'):
+                    key = 'id' if block['type'] == 'tool_use' else 'tool_use_id'
+                    if not isinstance(block.get(key), str) or not block[key]:
+                        raise ValueError('invalid Claude tool call/result ID')
     nodes = {r['uuid']: r for r in records if r.get('uuid') and not r.get('isSidechain')}
     leaves = [r for r in records if r.get('type') in ('user', 'assistant')
               and r.get('uuid') in nodes and not r.get('isSidechain')]
@@ -2349,13 +2493,46 @@ def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
             raise ValueError('missing Claude parent; export a complete transcript')
         node = nodes[parent]
     chain.reverse()
+    # T2: parallel Claude tool results are siblings, not ancestors of the last
+    # leaf. Recover only results explicitly linked to active tool-call nodes;
+    # unrelated user/assistant branches must remain excluded.
+    active_calls = {}
+    active_results = set()
+    for rec in chain:
+        content = rec.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if rec.get('type') == 'assistant' and block.get('type') == 'tool_use':
+                active_calls[block.get('id')] = rec['uuid']
+            elif block.get('type') == 'tool_result':
+                active_results.add(block.get('tool_use_id'))
+    siblings = []
+    for rec in records:
+        if rec.get('type') != 'user' or rec.get('uuid') in seen or nodes.get(rec.get('uuid')) is not rec:
+            continue
+        content = rec.get('message', {}).get('content', [])
+        if not isinstance(content, list) or not content:
+            continue
+        # Mixed user text on an abandoned branch cannot be reintroduced as if
+        # it were active. Only pure tool-result records qualify for recovery.
+        if all(isinstance(block, dict) and block.get('type') == 'tool_result' and
+               block.get('tool_use_id') in active_calls and block.get('tool_use_id') not in active_results and
+               active_calls[block['tool_use_id']] in (rec.get('sourceToolAssistantUUID'), rec.get('parentUuid'))
+               for block in content):
+            siblings.append(rec)
+    if siblings:
+        order = {id(rec): index for index, rec in enumerate(records)}
+        chain = sorted([*chain, *siblings], key=lambda rec: order[id(rec)])
     sid = leaves[-1].get('sessionId')
     if not isinstance(sid, str) or not sid:
         raise ValueError('Claude sessionId is missing')
     cwds = [r['cwd'] for r in chain if isinstance(r.get('cwd'), str) and r['cwd']]
     # Match existing Claude locator semantics: a visited subdirectory need not
     # be the project where the transcript actually lives (F2/F3).
-    cwd = next((c for c in reversed(cwds) if encode_cwd(c) == project_dir), cwds[-1] if cwds else '')
+    cwd = transcript_cwd(cwds, project_dir)
     stamp = next((r['timestamp'] for r in chain if r.get('timestamp')), '')
     session = PortableSession('claude', sid, cwd, stamp)
     for rec in chain:
@@ -2370,7 +2547,20 @@ def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
         message = rec.get('message')
         if not isinstance(message, dict) or message.get('role') != rec['type']:
             raise ValueError('invalid Claude message role')
-        append_portable_content(session, rec['type'], message.get('content'))
+        if not restore_teleport_metadata(rec, dict(role=message['role'], content=message.get('content')), session):
+            append_portable_content(session, rec['type'], message.get('content'))
+    # Claude has one result type for function and custom calls. Derive the
+    # result kind from the surviving call, including when a client edited only
+    # one side and invalidated that row's conversion metadata.
+    call_kinds = {}
+    for message in session.messages:
+        validate_portable_message(message)
+        if message.tool:
+            tool = message.tool
+            if message.role == 'assistant':
+                call_kinds[tool['call_id']] = tool['type']
+            elif tool.get('call_id') in call_kinds:
+                tool['type'] = call_kinds[tool['call_id']] + '_output'
     return session
 
 
@@ -2386,14 +2576,14 @@ def _codex_portable(records: list[dict]) -> PortableSession:
             raise ValueError('invalid Codex payload')
         kind = rec.get('type')
         if kind == 'response_item':
-            items.append(payload)
+            items.append((payload, rec))
         elif kind == 'compacted':
             # replacement_history is the actual context Codex resumes, not a
             # duplicate transcript to append to everything before compaction.
             replacement = payload.get('replacement_history')
             if not isinstance(replacement, list) or not all(isinstance(x, dict) for x in replacement):
                 raise ValueError('Codex compaction lacks replacement_history; cannot reconstruct context')
-            items = list(replacement)
+            items = [(item, {}) for item in replacement]
             session.note('only the active context after compaction is imported')
         elif kind == 'turn_context' and payload.get('cwd'):
             session.cwd = payload['cwd']
@@ -2403,27 +2593,25 @@ def _codex_portable(records: list[dict]) -> PortableSession:
             # Forks can prepend their own header to inherited parent history.
             # The first header owns this rollout; later headers are provenance.
             session.note('inherited Codex session metadata omitted')
-    for item in items:
+    for item, rec in items:
+        if restore_teleport_metadata(rec, item, session):
+            continue
         kind = item.get('type')
         if kind == 'message':
             role = item.get('role')
             if role not in ('user', 'assistant'):
                 session.note('source system/developer instructions omitted')
                 continue
-            append_portable_content(session, role, item.get('content'))
+            append_portable_content(session, role, item.get('content'), item.get('phase'))
             continue
         elif kind in ('function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output'):
-            session.note('tool calls/results rendered as historical text')
+            keys = ('type', 'call_id', 'name', 'namespace', 'arguments', 'input', 'output')
+            tool = {key: item[key] for key in keys if key in item}
             output = kind.endswith('_output')
-            # Tool output is untrusted evidence, never a new user instruction.
-            role = 'assistant'
-            value = item.get('output', '') if output else item.get('arguments', item.get('input', ''))
-            if output and isinstance(value, list):
-                value = portable_text(value, session)
-            if not isinstance(value, str):
-                value = json.dumps(value, ensure_ascii=False)
-            label = 'result' if output else 'call ' + str(item.get('name', 'unknown'))
-            text = f"[Historical tool {label} / {item.get('call_id', 'unknown')}]\n{value}"
+            if output:
+                tool['output'] = portable_output(tool.get('output'), session)
+            session.messages.append(PortableMessage('tool' if output else 'assistant', tool=tool))
+            continue
         elif kind == 'reasoning':
             session.note('private reasoning omitted')
             continue
@@ -2459,7 +2647,8 @@ def read_portable_session(path: Path) -> PortableSession:
     session = (_codex_portable(records) if records[0].get('type') == 'session_meta'
                else _claude_portable(records, path.parent.name))
     if not session.messages:
-        raise ValueError('no portable conversation text')
+        raise ValueError('no portable conversation content')
+    validate_portable_tools(session)
     if not isinstance(session.cwd, str) or not isinstance(session.timestamp, str):
         raise ValueError('invalid source cwd or timestamp')
     try:
@@ -2472,47 +2661,115 @@ def read_portable_session(path: Path) -> PortableSession:
     return session
 
 
+def claude_block(message: PortableMessage) -> dict:
+    tool = message.tool
+    if tool is None:
+        return dict(type='text', text=message.text)
+    kind = tool['type']
+    if kind.endswith('_output'):
+        output = tool['output']
+        if isinstance(output, list):
+            output = [dict(type='text', text=block['text']) for block in output]
+        block = dict(type='tool_result', tool_use_id=tool['call_id'], content=output)
+        if 'is_error' in tool:
+            block['is_error'] = tool['is_error']
+        return block
+    if kind == 'custom_tool_call':
+        arguments = dict(input=tool['input'])
+    else:
+        try:
+            arguments = json.loads(tool['arguments'])
+        except ValueError:
+            arguments = tool['arguments']
+        # Claude requires an object; metadata retains the original raw input.
+        if not isinstance(arguments, dict):
+            arguments = dict(input=arguments)
+    return dict(type='tool_use', id=tool['call_id'], name=tool['name'], input=arguments)
+
+
+def codex_item(message: PortableMessage) -> dict:
+    if message.tool is not None:
+        item = {key: value for key, value in message.tool.items() if key != 'is_error'}
+        if message.tool.get('is_error'):
+            # Responses has no native is_error bit: expose it inside the tool
+            # result and restore the precise original via conversion metadata.
+            output = item['output']
+            item['output'] = ('[Tool error]\n' + output if isinstance(output, str) else
+                              [dict(type='input_text', text='[Tool error]'), *output])
+        return item
+    item = dict(type='message', role=message.role, content=[dict(
+        type='input_text' if message.role == 'user' else 'output_text', text=message.text)])
+    if message.phase is not None:
+        item['phase'] = message.phase
+    return item
+
+
 def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> list[dict]:
-    stamp = session.timestamp
-    rows = []
+    validate_portable_tools(session)
+    stamp, rows = session.timestamp, []
     messages = session.messages
     if messages[0].role != 'user':
-        # Codex does not list assistant-only rollouts. Supply an explicitly
-        # synthetic preface, without presenting source tool output as a user.
-        messages = [PortableMessage('user', '[Import context] Conversation imported from '
-                    f'{session.agent}. The following assistant messages are historical context, '
-                    'including any labeled tool evidence; no historical tool action is pending.'), *messages]
+        messages = [PortableMessage('user', IMPORT_PREFACE,
+                                    synthetic=True), *messages]
     if target == 'codex':
+        # T5: omit model_provider so discovery uses the destination provider.
         rows.append(dict(type='session_meta', timestamp=stamp, payload=dict(
             id=sid, timestamp=stamp, cwd=cwd, originator='claude-session-teleporter',
-            # Omit model_provider: Codex resolves it from destination config.
-            # Hardcoding openai hides imports from custom-provider listings.
             cli_version=__version__, source='cli', history_mode='legacy')))
-    parent = None
-    for index, message in enumerate(messages):
-        mid = str(_uuid.uuid5(_uuid.UUID(sid), str(index)))
-        if target == 'codex':
-            # Model history and desktop history are separate: both are needed.
-            event = dict(type='user_message' if message.role == 'user' else 'agent_message', message=message.text)
-            if message.role == 'user':
-                event.update(images=[], local_images=[], text_elements=[])
+        calls = {}
+        for message in messages:
+            item = codex_item(message)
+            rows.append(with_teleport_metadata(dict(type='response_item', timestamp=stamp, payload=item), item, [message]))
+            if message.tool is None:
+                event = dict(type='user_message' if message.role == 'user' else 'agent_message', message=message.text)
+                if message.role == 'user':
+                    event.update(images=[], local_images=[], text_elements=[])
+                else:
+                    event['phase'] = message.phase or 'final_answer'
             else:
-                event['phase'] = 'final_answer'
+                tool = message.tool
+                if not tool['type'].endswith('_output'):
+                    calls[tool['call_id']] = tool
+                    event = dict(type='mcp_tool_call_begin', call_id=tool['call_id'], turn_id='',
+                                 invocation=dict(server='imported_history', tool=tool['name'],
+                                                 arguments=claude_block(message)['input']))
+                else:
+                    call = calls[tool['call_id']]
+                    output = item['output']
+                    content = [dict(type='text', text=output)] if isinstance(output, str) else [
+                        dict(type='text', text=block['text']) for block in output]
+                    # The installed Codex reader renders MCP events as completed
+                    # generic tool cards. This display namespace registers no tool.
+                    event = dict(type='mcp_tool_call_end', call_id=tool['call_id'], turn_id='',
+                                 invocation=dict(server='imported_history', tool=call['name'],
+                                                 arguments=claude_block(PortableMessage('assistant', tool=call))['input']),
+                                 result={'Ok': dict(content=content, isError=tool.get('is_error', False))},
+                                 duration=dict(secs=0, nanos=0))
             rows.append(dict(type='event_msg', timestamp=stamp, payload=event))
-            item = dict(type='message', role=message.role, content=[dict(
-                type='input_text' if message.role == 'user' else 'output_text', text=message.text)])
-            if message.role == 'assistant':
-                item['phase'] = 'final_answer'
-            rows.append(dict(type='response_item', timestamp=stamp, payload=item))
+        return rows
+    # Claude requires parallel calls in one assistant message and their results
+    # in the following user message. Group by native role, preserving block order.
+    groups = []
+    for message in messages:
+        role = 'user' if message.role == 'tool' else message.role
+        if groups and groups[-1][0] == role:
+            groups[-1][1].append(message)
         else:
-            msg = dict(role=message.role, content=[dict(type='text', text=message.text)])
-            if message.role == 'assistant':
-                msg.update(id='msg_' + mid.replace('-', ''), type='message', model='imported',
-                           stop_reason='end_turn', stop_sequence=None, usage=dict(input_tokens=0, output_tokens=0))
-            rows.append(dict(type=message.role, uuid=mid, parentUuid=parent, sessionId=sid,
-                             timestamp=stamp, cwd=cwd, isSidechain=False, userType='external',
-                             entrypoint='cli', version=__version__, message=msg))
-            parent = mid
+            groups.append((role, [message]))
+    parent = None
+    for index, (role, group) in enumerate(groups):
+        mid = str(_uuid.uuid5(_uuid.UUID(sid), str(index)))
+        projection = dict(role=role, content=[claude_block(message) for message in group])
+        msg = dict(projection)
+        if role == 'assistant':
+            msg.update(id='msg_' + mid.replace('-', ''), type='message', model='imported',
+                       stop_reason='tool_use' if any(m.tool for m in group) else 'end_turn',
+                       stop_sequence=None, usage=dict(input_tokens=0, output_tokens=0))
+        row = dict(type=role, uuid=mid, parentUuid=parent, sessionId=sid,
+                   timestamp=stamp, cwd=cwd, isSidechain=False, userType='external',
+                   entrypoint='cli', version=__version__, message=msg)
+        rows.append(with_teleport_metadata(row, projection, group))
+        parent = mid
     return rows
 
 
@@ -2612,7 +2869,7 @@ def cmd_teleport(args) -> int:
             dst = resolve_partition(parts, args.desktop_partition)
             c = CliSession(host=host or WINDOWS_HOST, transcript=target, cli_id=sid,
                            project_dir=target.parent.name, cwd=cwd, origin_cwd=cwd,
-                           title=session.messages[0].text.splitlines()[0][:70],
+                           title=session_title(session),
                            created_at=_ms(stamp), last_activity=int(time.time() * 1000))
             data, _ = build_adopted(c, adopt_template(dst), dst, connector_names(parts))
             # Never inherit donor approvals, worktrees, or runtime session settings.
@@ -2631,7 +2888,7 @@ def cmd_teleport(args) -> int:
             print(f'  {count}x {note}')
         if session.messages[0].role != 'user':
             print('  Added a labeled import preface for assistant-first history.')
-        print('Project files and source permissions are not copied. Historical tools are text, not executable calls.')
+        print('Project files and source permissions are not copied. Completed tools retain native call/result structure.')
         # An existing transcript may have been resumed/modified: never replace it
         # or add metadata to a half-existing import based on assumptions.
         if existing or any(p.exists() or p.is_symlink() for p, _ in files):

@@ -82,13 +82,26 @@ rollouts). Windows and WSL stores are separate. When their path spellings
 differ, supply `--cwd` in the destination's syntax; the working tree must
 already exist. The tool does not move files or rewrite paths inside messages.
 
-**What transfers:** active user/assistant text, and tool calls/results as
-labeled assistant history, so tool output never becomes a new user instruction. After compaction, this can be the summary and recent
-history instead of all older turns. Private reasoning and source system
-instructions are omitted; images and unsupported content get placeholders.
-The dry run reports these changes. Tool permissions, credentials, running
-processes and pending tool calls do not transfer. Destination tools and project
-instructions apply when you resume.
+**What transfers:** active user/assistant text and completed native tool calls
+and results, including their IDs, names, arguments, output and order. Claude
+uses `tool_use`/`tool_result`; Codex uses function/custom call and output items.
+Codex also receives completed tool cards under an `imported_history` display
+namespace. Historical tools are not registered or rerun.
+
+Both round trips—Claude → Codex → Claude and Codex → Claude → Codex—preserve
+supported conversation content. Conversion metadata retains distinctions the
+other format cannot express directly, such as custom tool input, argument JSON
+formatting, error flags and assistant phases. It is checked against the native
+record before reuse; changed native content takes precedence. New session IDs
+and message envelopes are expected, and clients that discard this metadata can
+reduce return-trip fidelity. See the [native-tool investigation and tests](docs/teleport-native-tools.md).
+
+Private reasoning and source system instructions are omitted; images and
+unsupported content get placeholders. Compaction transfers the surviving
+context, which may exclude older turns. The dry run reports these changes.
+Tool permissions, credentials and running processes do not transfer. Pending,
+orphaned or duplicate tool exchanges are rejected before writing; finish the
+source turn first. Destination tools and project instructions apply on resume.
 
 Dry runs create nothing. Applying never edits the source or overwrites an
 existing import. Repeating the command is a no-op, including for archived Codex

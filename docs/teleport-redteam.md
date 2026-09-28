@@ -1,4 +1,8 @@
-# Claude ↔ Codex red-team pass
+# Claude ↔ Codex first red-team pass
+
+This is the historical evidence for the first pass. Its text-only tool policy
+is superseded by the [native-tool and round-trip correction](teleport-native-tools.md);
+that report records the current behavior and verification.
 
 Baseline: `268eea0` (PR #8), 2026-09-28. Scope: native history conversion,
 Codex discovery, continuation through real clients, and destination write

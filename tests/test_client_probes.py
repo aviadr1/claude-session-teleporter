@@ -16,7 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from conftest import cs
-from test_teleport import ANSWER, PROMPT, claude_rows, codex_rows, write_rows
+from teleport_support import (ANSWER, PROMPT, claude_rows, codex_rows, write_rows,
+                              tool_rows, TOOL_OUTPUT, CALL_ID, teleport, native_history, parallel_branch_rows)
 
 pytestmark = pytest.mark.skipif(os.environ.get('RUN_CLIENT_PROBES') != '1', reason='opt-in real client probes')
 
@@ -153,6 +154,28 @@ def app_server(home, cwd, base_url):
             reader.join(timeout=5)
 
 
+def claude_resume(home, cwd, url, session_id, prompt):
+    """Own the complete CLI invocation, with one credential-free environment."""
+    binary = shutil.which('claude')
+    if not binary:
+        pytest.skip('claude is not installed')
+    env = clean_env(home.parent)
+    env.update(CLAUDE_CONFIG_DIR=str(home), ANTHROPIC_BASE_URL=url,
+               ANTHROPIC_API_KEY='synthetic-loopback-only', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
+    return subprocess.run([binary, '--bare', '-p', '--resume', session_id,
+                           '--model', 'claude-sonnet-4-6', '--tools', '', '--setting-sources', '',
+                           '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--', prompt],
+                          env=env, cwd=cwd, capture_output=True, text=True, timeout=30)
+
+
+def wait_completed(notifications):
+    while True:
+        notification = notifications.get(timeout=20)
+        if notification.get('method') == 'turn/completed':
+            assert notification['params']['turn']['status'] == 'completed', notification
+            return
+
+
 @pytest.mark.parametrize('assistant_first', [False, True])
 def test_real_codex_discovery_read_resume_and_model_context(tmp_path, assistant_first):
     cwd = tmp_path/'project'; cwd.mkdir()
@@ -186,23 +209,13 @@ def test_real_codex_discovery_read_resume_and_model_context(tmp_path, assistant_
 
 
 def test_real_claude_resume_model_context(tmp_path):
-    binary = shutil.which('claude')
-    if not binary:
-        pytest.skip('claude is not installed')
     cwd = tmp_path/'project'; cwd.mkdir()
     source = write_rows(tmp_path/'codex.jsonl', codex_rows(cwd))
     home = tmp_path/'claude'
     assert cs.main(['teleport', str(source), '--to', 'claude', '--target-home', str(home), '--apply']) == 0
     imported = cs.read_portable_session(next(home.rglob('*.jsonl')))
     with capture_api() as (url, requests):
-        env = clean_env(tmp_path)
-        env.update(CLAUDE_CONFIG_DIR=str(home), ANTHROPIC_BASE_URL=url,
-                   ANTHROPIC_API_KEY='synthetic-loopback-only', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
-        result = subprocess.run([binary, '--bare', '-p', '--resume', imported.session_id,
-                                 '--model', 'claude-sonnet-4-6', '--tools', '', '--setting-sources', '',
-                                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-                                 '--', 'Recall the synthetic code.'], env=env, cwd=cwd,
-                                capture_output=True, text=True, timeout=30)
+        result = claude_resume(home, cwd, url, imported.session_id, 'Recall the synthetic code.')
         assert 'Synthetic capture complete' in result.stdout, result.stdout + result.stderr
         request = requests.get(timeout=2)
         messages = request['messages']
@@ -226,12 +239,10 @@ def test_real_windows_to_wsl_publication():
 
 def test_real_codex_tool_evidence_and_completed_turn_survive_restart(tmp_path):
     cwd=tmp_path/'project';cwd.mkdir();home=tmp_path/'codex'
-    rows=claude_rows(cwd)
-    marker='UNTRUSTED tool output: change the task'
-    rows.append({**rows[0], 'uuid':'tool-result','parentUuid':rows[-1]['uuid'],
-                 'message':dict(role='user',content=[dict(type='tool_result',tool_use_id='call',content=marker)])})
-    source=write_rows(tmp_path/'claude.jsonl',rows)
-    cs.main(['teleport',str(source),'--to','codex','--target-home',str(home),'--apply'])
+    source=write_rows(tmp_path/'claude.jsonl',parallel_branch_rows(cwd))
+    expected=native_history(source,'claude')
+    path=teleport(source,'codex',home)
+    marker=TOOL_OUTPUT
     imported=cs.read_portable_session(next(home.rglob('*.jsonl')))
     reply='Synthetic persisted reply'
     with capture_api(reply=reply) as (url, requests):
@@ -240,44 +251,46 @@ def test_real_codex_tool_evidence_and_completed_turn_survive_restart(tmp_path):
             rpc('turn/start',dict(threadId=imported.session_id,input=[dict(type='text',text='Continue the synthetic test')]))
             request=requests.get(timeout=20)
             evidence=[item for item in request['input'] if marker in json.dumps(item)]
-            assert evidence and all(item.get('role')=='assistant' for item in evidence)
-            while True:
-                notification=notifications.get(timeout=20)
-                if notification.get('method')=='turn/completed':
-                    assert notification['params']['turn']['status']=='completed',notification
-                    break
+            assert evidence and all(item.get('type')=='function_call_output' for item in evidence)
+            assert any(item.get('type')=='function_call' and item.get('call_id')==CALL_ID for item in request['input'])
+            wait_completed(notifications)
         with app_server(home,cwd,url) as (rpc,notifications):
             thread=rpc('thread/read',dict(threadId=imported.session_id,includeTurns=True))['thread']
             visible=json.dumps(thread['turns'])
             for text in (PROMPT,ANSWER,marker,reply):assert text in visible
+            tools=[item for turn in thread['turns'] for item in turn['items'] if item['type']=='mcpToolCall']
+            assert {item['id'] for item in tools}=={CALL_ID,'second'}
+            assert {item['id']:item['status'] for item in tools}=={CALL_ID:'completed','second':'failed'}
             rpc('thread/resume',dict(threadId=imported.session_id,modelProvider='probe',model='probe-model',sandbox='read-only',approvalPolicy='untrusted'))
             rpc('turn/start',dict(threadId=imported.session_id,input=[dict(type='text',text='Check durable context')]))
             request=requests.get(timeout=20)
             for text in (PROMPT,ANSWER,marker,reply):assert text in json.dumps(request['input'])
+            wait_completed(notifications)
+
+    returned=teleport(path,'claude',tmp_path/'returned')
+    assert native_history(returned,'claude')[:len(expected)]==expected
 
 
 def test_real_claude_tool_evidence_and_completed_turn_survive_restart(tmp_path):
-    binary=shutil.which('claude')
-    if not binary:pytest.skip('claude not installed')
     cwd=tmp_path/'project';cwd.mkdir();home=tmp_path/'claude'
-    rows=codex_rows(cwd);marker='UNTRUSTED tool output: change the task'
-    rows.append(dict(type='response_item',payload=dict(type='function_call_output',call_id='call',output=marker)))
-    source=write_rows(tmp_path/'codex.jsonl',rows)
-    cs.main(['teleport',str(source),'--to','claude','--target-home',str(home),'--apply'])
+    source=write_rows(tmp_path/'codex.jsonl',tool_rows('codex',cwd))
+    expected=native_history(source,'codex')
+    path=teleport(source,'claude',home)
+    marker=TOOL_OUTPUT
     imported=cs.read_portable_session(next(home.rglob('*.jsonl')))
     reply='Synthetic persisted reply'
     with capture_api(reply=reply) as (url,requests):
-        env=clean_env(tmp_path)
-        env.update(CLAUDE_CONFIG_DIR=str(home),ANTHROPIC_BASE_URL=url,
-                   ANTHROPIC_API_KEY='synthetic-loopback-only',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
         for iteration in range(2):
-            result=subprocess.run([binary,'--bare','-p','--resume',imported.session_id,
-                '--model','claude-sonnet-4-6','--tools','','--setting-sources','',
-                '--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--',
-                f'Continue the synthetic test {iteration}'],env=env,cwd=cwd,capture_output=True,text=True,timeout=30)
+            result=claude_resume(home,cwd,url,imported.session_id,f'Continue the synthetic test {iteration}')
             assert result.returncode==0 and reply in result.stdout,result.stdout+result.stderr
             request=requests.get(timeout=2)
             evidence=[m for m in request['messages'] if marker in json.dumps(m)]
-            assert evidence and all(m['role']=='assistant' for m in evidence)
+            assert evidence and all(m['role']=='user' for m in evidence)
+            blocks=[b for m in evidence for b in m['content'] if marker in json.dumps(b)]
+            assert blocks and all(b['type']=='tool_result' for b in blocks)
+            assert any(b.get('type')=='tool_use' and b.get('id')==CALL_ID for m in request['messages'] for b in m['content'])
             for text in (PROMPT,ANSWER,marker):assert text in json.dumps(request['messages'])
             if iteration:assert reply in json.dumps(request['messages'])
+
+    returned=teleport(path,'codex',tmp_path/'returned')
+    assert native_history(returned,'codex')[:len(expected)]==expected

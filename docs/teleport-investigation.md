@@ -7,7 +7,8 @@ session was imported, changed, or submitted to a model during development.
 The subsequent [red-team pass](teleport-redteam.md) found and corrected five
 issues, including a provider-filtering blind spot in the initial probe. It also
 added successful client continuation and persistence checks. The experiments
-below describe the initial investigation.
+below describe the initial investigation. The later [native-tool and round-trip
+correction](teleport-native-tools.md) replaces the initial text-only tool conversion.
 
 ## What was probed
 
@@ -59,11 +60,13 @@ documents resuming by session ID.
 
 - A teleport creates an independent fork; the original remains unchanged.
 - Retain active user and assistant text in order. Follow Claude's latest main
-  parent chain instead of mixing branches or subagents. For Codex compaction,
+  parent chain and results explicitly linked to its parallel tool calls, without
+  mixing abandoned conversation branches or subagents. For Codex compaction,
   use the latest `replacement_history` and subsequent response items.
-- Preserve tool inputs/results as labeled historical text, with call IDs.
-  Never create a pending or executable foreign tool call. Do not translate
-  Bash into exec_command, or attempt to recreate a tool registry.
+- Preserve completed tools as native calls and results, with original names and
+  IDs. Conversion metadata restores format-specific distinctions on return.
+  No historical tool is registered or rerun; pending and ambiguous pairs fail
+  before writing. See [the native-tool contract](teleport-native-tools.md).
 - Omit private reasoning, encrypted reasoning, source system/developer
   instructions and runtime permissions. Unsupported media/items receive visible
   placeholders and a count in the conversion plan. No silent truncation.

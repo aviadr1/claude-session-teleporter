@@ -1,7 +1,7 @@
 # Claude ↔ Codex teleport validation
 
 - [x] CLI journeys in both directions: dry run, apply, reload, stable repeat; source bytes unchanged.
-- [x] Preserve ordered conversation text and tool evidence; never emit executable historical tools or copy permissions/instructions.
+- [x] Preserve ordered conversation text and native completed tool exchanges; never replay historical tools or copy permissions/instructions.
 - [x] Claude branch selection; Codex compaction replacement context; malformed/unsupported history fails before writes.
 - [x] Desktop: Codex display events and index discovery; Claude destination metadata, org connectors, tombstones, native/WSL placement.
 - [x] Failure safety: existing paths, archived Codex ID, partial write rollback, invalid cwd and incomplete source.
@@ -33,3 +33,15 @@ Frozen implementation `9f7cea9`: Linux 119 passed (5 real-client probes),
 7 live-store drift checks deselected in each run. The separate actual
 Windows-to-WSL publication probe passed. All 9 CI checks passed in run
 https://github.com/aviadr1/claude-session-teleporter/actions/runs/36420111947.
+
+## Native tools and round-trip correction
+
+- [x] CLI round trips in both directions, repeated three times: preserve native call/result pairs, argument JSON, custom inputs, error flags, phases, and ordered content.
+- [x] Reject orphan, pending, duplicate call/result histories before publication.
+- [x] Real Codex backend: native tool cards, native model request items, completed turn and restart, then return conversion.
+- [x] Real Claude: native tool_use/tool_result request blocks, completed turn and restart, then return conversion.
+- [x] Stale conversion metadata cannot restore obsolete content after a native record changes.
+- [x] Keep synthetic assistant-first prefaces from accumulating across round trips.
+
+- [x] Replay Claude parallel-result sibling layout through the CLI and real Codex continuation.
+- [x] Reject malformed identifiers and verify native history remains usable without conversion metadata.

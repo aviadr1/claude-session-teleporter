@@ -6,35 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import cs
 
-SID = 'a4c61cf0-1705-4017-8402-38c70b30ed75'
-STAMP = '2026-09-28T10:00:00.000Z'
-PROMPT = 'Remember the synthetic code: TELEPORT-47.'
-ANSWER = 'The synthetic code is TELEPORT-47.'
-
-
-def write_rows(path, rows):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(''.join(json.dumps(r) + '\n' for r in rows), encoding='utf-8')
-    return path
-
-
-def claude_rows(cwd):
-    rows = []
-    parent = None
-    for role, text in [('user', PROMPT), ('assistant', ANSWER)]:
-        mid = str(uuid.uuid4())
-        rows.append(dict(type=role, uuid=mid, parentUuid=parent, sessionId=SID,
-                         timestamp=STAMP, cwd=str(cwd), isSidechain=False,
-                         message=dict(role=role, content=[dict(type='text', text=text)])))
-        parent = mid
-    return rows
-
-
-def codex_rows(cwd):
-    return [dict(type='session_meta', timestamp=STAMP, payload=dict(id=SID, cwd=str(cwd), timestamp=STAMP)),
-            *[dict(type='response_item', timestamp=STAMP, payload=dict(type='message', role=role,
-              content=[dict(type=kind, text=text)])) for role, kind, text in
-              [('user', 'input_text', PROMPT), ('assistant', 'output_text', ANSWER)]]]
+from teleport_support import SID, STAMP, PROMPT, ANSWER, write_rows, claude_rows, codex_rows
 
 
 @pytest.fixture(params=['claude', 'codex'])
@@ -81,7 +53,7 @@ def test_codex_has_both_model_history_and_desktop_history(journey):
 
 
 @pytest.mark.parametrize('agent', ['claude', 'codex'])
-def test_tools_are_text_and_private_reasoning_is_omitted(tmp_path, agent):
+def test_tools_are_structured_and_private_reasoning_is_omitted(tmp_path, agent):
     rows = claude_rows(tmp_path) if agent == 'claude' else codex_rows(tmp_path)
     if agent == 'claude':
         rows[-1]['message']['content'] += [dict(type='thinking', thinking='PRIVATE'),
@@ -94,7 +66,7 @@ def test_tools_are_text_and_private_reasoning_is_omitted(tmp_path, agent):
             dict(type='function_call', call_id='tool1', name='exec_command', arguments='{"cmd":"echo EVIDENCE"}'),
             dict(type='function_call_output', call_id='tool1', output='EVIDENCE')]]
     session = cs.read_portable_session(write_rows(tmp_path/'source.jsonl', rows))
-    texts = '\n'.join(m.text for m in session.messages)
+    texts = json.dumps([{'text':m.text,'tool':m.tool} for m in session.messages])
     assert 'PRIVATE' not in texts
     assert 'EVIDENCE' in texts and 'tool1' in texts
     assert session.notices
@@ -239,7 +211,7 @@ def test_images_get_visible_placeholder_and_notice(tmp_path):
     rows[0]['message']['content'].append(dict(type='image',source={'data':'SECRET-BINARY'}))
     result=cs.read_portable_session(write_rows(tmp_path/'source.jsonl',rows))
     assert 'SECRET-BINARY' not in str(result)
-    assert 'unavailable' in result.messages[0].text
+    assert any('unavailable' in m.text for m in result.messages)
     assert any('image' in n for n in result.notices)
 
 
