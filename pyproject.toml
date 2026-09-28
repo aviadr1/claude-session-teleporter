@@ -1,6 +1,6 @@
 [project]
 name = "claude-session-teleporter"
-version = "1.1.0"                      # kept in step with __version__ by test_packaging.py
+version = "1.1.1"                      # kept in step with __version__ by test_packaging.py
 description = "Teleport Claude Code sessions between account/org partitions, and between WSL and the Windows desktop app"
 readme = "README.md"
 license = "MIT"
