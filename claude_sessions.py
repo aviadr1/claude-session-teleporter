@@ -2305,6 +2305,28 @@ def portable_text(content, session: PortableSession) -> str:
     return '\n'.join(out)
 
 
+def append_portable_content(session: PortableSession, role: str, content) -> None:
+    """Preserve block order without upgrading tool evidence to user authority."""
+    if not isinstance(content, list):
+        text = portable_text(content, session)
+        if text:
+            session.messages.append(PortableMessage(role, text))
+        return
+    parts, current_role = [], role
+    for block in content:
+        text = portable_text([block], session)
+        if not text:
+            continue
+        block_role = 'assistant' if block.get('type') in ('tool_result', 'tool_use') else role
+        if parts and block_role != current_role:
+            session.messages.append(PortableMessage(current_role, '\n'.join(parts)))
+            parts = []
+        current_role = block_role
+        parts.append(text)
+    if parts:
+        session.messages.append(PortableMessage(current_role, '\n'.join(parts)))
+
+
 def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
     # Follow the last main-chain leaf, including non-message parent nodes. File
     # order alone can replay abandoned branches or subagents as user history.
@@ -2348,9 +2370,7 @@ def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
         message = rec.get('message')
         if not isinstance(message, dict) or message.get('role') != rec['type']:
             raise ValueError('invalid Claude message role')
-        text = portable_text(message.get('content'), session)
-        if text:
-            session.messages.append(PortableMessage(rec['type'], text))
+        append_portable_content(session, rec['type'], message.get('content'))
     return session
 
 
@@ -2390,11 +2410,13 @@ def _codex_portable(records: list[dict]) -> PortableSession:
             if role not in ('user', 'assistant'):
                 session.note('source system/developer instructions omitted')
                 continue
-            text = portable_text(item.get('content'), session)
+            append_portable_content(session, role, item.get('content'))
+            continue
         elif kind in ('function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output'):
             session.note('tool calls/results rendered as historical text')
             output = kind.endswith('_output')
-            role = 'user' if output else 'assistant'
+            # Tool output is untrusted evidence, never a new user instruction.
+            role = 'assistant'
             value = item.get('output', '') if output else item.get('arguments', item.get('input', ''))
             if output and isinstance(value, list):
                 value = portable_text(value, session)
@@ -2453,12 +2475,21 @@ def read_portable_session(path: Path) -> PortableSession:
 def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> list[dict]:
     stamp = session.timestamp
     rows = []
+    messages = session.messages
+    if messages[0].role != 'user':
+        # Codex does not list assistant-only rollouts. Supply an explicitly
+        # synthetic preface, without presenting source tool output as a user.
+        messages = [PortableMessage('user', '[Import context] Conversation imported from '
+                    f'{session.agent}. The following assistant messages are historical context, '
+                    'including any labeled tool evidence; no historical tool action is pending.'), *messages]
     if target == 'codex':
         rows.append(dict(type='session_meta', timestamp=stamp, payload=dict(
             id=sid, timestamp=stamp, cwd=cwd, originator='claude-session-teleporter',
-            cli_version=__version__, source='cli', model_provider='openai', history_mode='legacy')))
+            # Omit model_provider: Codex resolves it from destination config.
+            # Hardcoding openai hides imports from custom-provider listings.
+            cli_version=__version__, source='cli', history_mode='legacy')))
     parent = None
-    for index, message in enumerate(session.messages):
+    for index, message in enumerate(messages):
         mid = str(_uuid.uuid5(_uuid.UUID(sid), str(index)))
         if target == 'codex':
             # Model history and desktop history are separate: both are needed.
@@ -2514,11 +2545,25 @@ def _publish_teleport(files: list[tuple[Path, str]], tombstone: Path | None) -> 
             if tombstone is not None and tombstone.exists():
                 raise ValueError('destination session has a deletion tombstone')
             # Publish a complete file, never replacing a concurrent writer.
+            expected = temporary.stat()
             publish_teleport_file(temporary, path)
-            published.append(path)
+            published.append((path, expected))
     except BaseException:
-        for path in reversed(published):
-            path.unlink()
+        for path, expected in reversed(published):
+            try:
+                actual = path.lstat()
+                # A consumer can replace or resume the transcript before a
+                # later metadata write fails. Preserve that consumer's work.
+                if (actual.st_dev, actual.st_ino, actual.st_size, actual.st_mtime_ns) == (
+                    expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns
+                ):
+                    path.unlink()
+                else:
+                    warn(f'preserved a concurrently changed import: {path}')
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_error:
+                warn(f'could not clean up incomplete import {path}: {cleanup_error}')
         raise
     finally:
         for temporary in staged:
@@ -2584,10 +2629,15 @@ def cmd_teleport(args) -> int:
         print(f'Source: {source}\nDestination: {target}\nSession: {sid}\nWorking directory: {cwd}')
         for note, count in session.notices.items():
             print(f'  {count}x {note}')
+        if session.messages[0].role != 'user':
+            print('  Added a labeled import preface for assistant-first history.')
         print('Project files and source permissions are not copied. Historical tools are text, not executable calls.')
         # An existing transcript may have been resumed/modified: never replace it
         # or add metadata to a half-existing import based on assumptions.
         if existing or any(p.exists() or p.is_symlink() for p, _ in files):
+            if len(files) > 1 and not all(p.is_file() for p, _ in files):
+                raise ValueError('incomplete desktop import: transcript and metadata are not both present; '
+                                 'existing files were preserved. Inspect the destination before retrying')
             print('Destination already exists; left untouched (including archived imports).')
             return 0
         if not args.apply:

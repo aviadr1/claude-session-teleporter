@@ -4,6 +4,11 @@ Investigated 2026-09-28 with **Codex CLI 0.151.0** and **Claude Code 2.1.238**.
 The implementation remains one standard-library Python file. No personal
 session was imported, changed, or submitted to a model during development.
 
+The subsequent [red-team pass](teleport-redteam.md) found and corrected five
+issues, including a provider-filtering blind spot in the initial probe. It also
+added successful client continuation and persistence checks. The experiments
+below describe the initial investigation.
+
 ## What was probed
 
 1. Inspected the original teleporter, its safety invariants, the installed CLI
@@ -73,7 +78,8 @@ documents resuming by session ID.
   prevent reintroducing a deleted one. No background synchronization is implied.
 - Stage complete files and publish using exclusive hard links on POSIX, or
   Windows rename (which refuses existing destinations). On publication
-  failure, remove only this operation's published files. Unsupported filesystem
+  failure, remove only this operation's unchanged published files; preserve detected
+  changes by other consumers. Unsupported filesystem
   operations fail rather than fall back to overwriting.
 
 ## Desktop and host boundaries

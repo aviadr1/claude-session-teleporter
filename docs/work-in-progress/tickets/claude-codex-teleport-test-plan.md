@@ -15,3 +15,15 @@ alongside the feature suite (31 passed, 1 non-applicable direction skipped).
 The full Linux suite has one existing sdk-cli drift failure, reproduced on the
 original commit; see docs/teleport-investigation.md. Graphical desktop open/send
 is not claimed by the backend/metadata checks above. Wheel/sdist builds pass.
+
+
+## Red-team follow-up
+
+- [x] Cleanup preserves replaced/edited/deleted destination files after failure.
+- [x] Mixed tool/user blocks preserve order without promoting tool output to user authority.
+- [x] Default Codex discovery respects the configured provider and assistant-first imports.
+- [x] Partial desktop imports fail explicitly instead of claiming success.
+- [x] Both real clients complete synthetic turns and retain original/new history across restart.
+- [ ] Final red-team candidate: full Linux, native Windows, Python 3.10, Windows-to-WSL, and CI checks.
+
+Detailed reproducers and verification boundaries: docs/teleport-redteam.md.

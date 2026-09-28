@@ -292,7 +292,8 @@ Archived Codex imports and Claude desktop tombstones remain respected.
 ### T2 — Preserve active conversation order without replaying foreign tools
 
 Claude follows its last main parent chain; Codex uses replacement context after
-compaction. Tool evidence is text. Reasoning and source instructions/permissions
+compaction. Tool evidence is labeled assistant text, never a new user instruction.
+Reasoning and source instructions/permissions
 are omitted; unsupported media gets an explicit placeholder and notice.
 
 > `test_claude_follows_latest_branch_not_siblings`,
@@ -306,7 +307,9 @@ are omitted; unsupported media gets an explicit placeholder and notice.
 
 No guessed history for malformed JSON, orphaned Claude branches, Codex
 rollbacks or summary-only compactions. Publish complete files without replacing
-concurrent writers; roll back our own files on a multi-file failure.
+concurrent writers; roll back unchanged files from our own operation on a
+multi-file failure. Preserve files detected as replaced, edited or removed by
+another consumer. A partial desktop import is an explicit error, not success.
 
 > `test_bad_source_fails_without_writes`, `test_missing_branch_parent_fails`,
 > `test_refused_import_does_not_create_destination`,
@@ -324,3 +327,22 @@ Codex backend and both CLI loaders are exercised by opt-in binary probes.
 > `test_wsl_desktop_points_at_imported_transcript`,
 > `test_real_codex_discovery_read_resume_and_model_context`,
 > `test_real_claude_resume_model_context`
+
+
+### T5 — Discovery and continuation use the destination client context
+
+Imported Codex sessions inherit the destination provider instead of claiming
+OpenAI regardless of configuration. Assistant-first histories get a labeled
+synthetic import preface so clients can discover and resume them.
+
+> `test_assistant_first_history_gets_explicit_import_context`,
+> `test_real_codex_discovery_read_resume_and_model_context`,
+> `test_real_codex_tool_evidence_and_completed_turn_survive_restart`,
+> `test_real_claude_tool_evidence_and_completed_turn_survive_restart`
+
+Adversarial coverage for T2/T3 additionally includes:
+`test_tool_output_never_becomes_a_user_instruction`,
+`test_mixed_claude_content_keeps_user_text_separate_from_tool_output`,
+`test_failed_desktop_publication_preserves_replaced_transcript`,
+`test_cleanup_preserves_a_consumers_changes`, and
+`test_retry_of_partial_desktop_import_is_not_reported_successful`.

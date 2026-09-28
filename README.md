@@ -83,7 +83,7 @@ differ, supply `--cwd` in the destination's syntax; the working tree must
 already exist. The tool does not move files or rewrite paths inside messages.
 
 **What transfers:** active user/assistant text, and tool calls/results as
-labeled historical text. After compaction, this can be the summary and recent
+labeled assistant history, so tool output never becomes a new user instruction. After compaction, this can be the summary and recent
 history instead of all older turns. Private reasoning and source system
 instructions are omitted; images and unsupported content get placeholders.
 The dry run reports these changes. Tool permissions, credentials, running
@@ -93,7 +93,9 @@ instructions apply when you resume.
 Dry runs create nothing. Applying never edits the source or overwrites an
 existing import. Repeating the command is a no-op, including for archived Codex
 imports. Deleted Claude desktop imports are refused. Malformed/incomplete transcripts,
-unsupported rollback history and unavailable directories are rejected.
+unsupported rollback history and unavailable directories are rejected. Partial desktop
+imports are reported as errors; existing files are preserved for inspection.
+See the [red-team findings and fixes](docs/teleport-redteam.md).
 
 ## What it looks like
 
