@@ -47,3 +47,5 @@ https://github.com/aviadr1/claude-session-teleporter/actions/runs/36420111947.
 - [x] Reject malformed identifiers and verify native history remains usable without conversion metadata.
 
 Frozen native-tool implementation `f081c23`: Linux 141 passed (five real-client cases), Python 3.10 and native Windows 136 passed each; Windows-to-WSL probe passed. See [the current evidence and limits](../../teleport-native-tools.md).
+
+- [x] Real Claude interruption probe found discarded late tool output; two fail-first CLI regressions now reject nonadjacent result groups before publication.

@@ -42,7 +42,8 @@ and regenerated at most once, so they do not accumulate on every trip.
 Private reasoning, source system/developer instructions, runtime permissions,
 and media are still outside the portable contract. Media and unknown items
 get visible placeholders. Compaction transfers surviving context. Pending,
-orphaned, mismatched or duplicate tool exchanges fail before publication.
+orphaned, mismatched or duplicate tool exchanges fail before publication. Claude
+imports also require each complete result group immediately after its call group.
 
 ## Findings and fail-first tests
 
@@ -62,6 +63,15 @@ orphaned, mismatched or duplicate tool exchanges fail before publication.
 4. **P2: malformed IDs raised Python type errors.** Three failing regressions
    used list-valued record/call/result IDs. The reader now rejects those cleanly
    before writing.
+
+5. **P1: Claude discarded interleaved results after reporting import success.**
+   After the first frozen candidate passed CI, another real CLI probe imported
+   a completed call whose result came after a new user/assistant exchange. Claude
+   exited successfully and sent one call and one result, but the original result
+   content was absent: its loader had inserted a synthetic interruption result.
+   Two new regressions (an intervening turn and a split parallel result group)
+   failed before the fix. Claude projection now requires adjacent complete
+   call/result groups and rejects an unsupported ordering before publication.
 
 The previous assistant-text tests were revised to assert native tool authority.
 Claude tool results live inside a user message **as `tool_result` blocks**;

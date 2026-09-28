@@ -132,3 +132,18 @@ def test_native_tool_history_is_usable_without_conversion_metadata(tmp_path,targ
         assert sum(item['type'].endswith('_call_output') for item in history)==2
     else:
         assert sum(block['type']=='tool_result' for _,block in history)==2
+
+
+@pytest.mark.parametrize('gap',['new-turn','split-results'])
+def test_claude_import_refuses_tool_results_its_loader_would_discard(tmp_path,gap):
+    rows=tool_rows('codex',tmp_path)
+    assistant=dict(type='response_item',payload=dict(type='message',role='assistant',content=[dict(type='output_text',text='Intervening assistant reply')]))
+    if gap=='new-turn':
+        user=dict(type='response_item',payload=dict(type='message',role='user',content=[dict(type='input_text',text='Interruption')]))
+        rows[5:5]=[user,assistant]
+    else:
+        rows.insert(6,assistant)
+    source=write_rows(tmp_path/'source.jsonl',rows);home=tmp_path/'destination'
+    with pytest.raises(SystemExit):
+        teleport(source,'claude',home)
+    assert not home.exists()

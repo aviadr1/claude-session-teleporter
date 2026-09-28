@@ -101,7 +101,9 @@ unsupported content get placeholders. Compaction transfers the surviving
 context, which may exclude older turns. The dry run reports these changes.
 Tool permissions, credentials and running processes do not transfer. Pending,
 orphaned or duplicate tool exchanges are rejected before writing; finish the
-source turn first. Destination tools and project instructions apply on resume.
+source turn first. Claude imports also reject results separated from their call
+group by intervening turns, because its loader discards that output. Destination
+tools and project instructions apply on resume.
 
 Dry runs create nothing. Applying never edits the source or overwrites an
 existing import. Repeating the command is a no-op, including for archived Codex

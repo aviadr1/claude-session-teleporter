@@ -2756,6 +2756,17 @@ def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> 
             groups[-1][1].append(message)
         else:
             groups.append((role, [message]))
+    # T6: Claude repairs missing/nonadjacent results by dropping late output
+    # and inserting a synthetic interruption. Refuse that lossy projection.
+    for index, (role, group) in enumerate(groups):
+        if role != 'assistant':
+            continue
+        calls = {message.tool['call_id'] for message in group if message.tool}
+        results = ({message.tool['call_id'] for message in groups[index + 1][1] if message.tool}
+                   if index + 1 < len(groups) else set())
+        if calls != results:
+            raise ValueError('Claude cannot preserve this interleaved tool exchange; '
+                             'results must immediately follow their call group')
     parent = None
     for index, (role, group) in enumerate(groups):
         mid = str(_uuid.uuid5(_uuid.UUID(sid), str(index)))

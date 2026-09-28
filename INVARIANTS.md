@@ -353,7 +353,9 @@ Adversarial coverage for T2/T3 additionally includes:
 ### T6 — Supported conversation content survives both round trips
 
 `PortableMessage` is the shared text/tool model for both readers and writers.
-`validate_portable_tools` enforces complete, unique exchanges. Each generated
+`validate_portable_tools` enforces complete, unique exchanges. `teleport_rows`
+also enforces adjacent Claude call/result groups, preventing its native loader
+from silently discarding late results. Each generated
 native record has versioned conversion metadata, bound to its projection by a
 SHA-256 digest. Restoration validates the metadata shape and reprojects it to
 ensure it agrees with the native record; edited native content takes precedence.
