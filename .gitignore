@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 dist/
+
+# promo video (demo/video): dependencies and scratch renders
+node_modules/
+demo/video/out/
