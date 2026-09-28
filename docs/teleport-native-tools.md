@@ -103,4 +103,29 @@ the real app-server API. The graphical check remains outstanding.
 
 ## Verification
 
-The commands and frozen revision results are recorded below after final checks.
+Frozen implementation **`f081c23`**:
+
+- Linux Python 3.14: **141 passed, 2 skipped**, including five real-client cases.
+- Python 3.10: **136 passed, 7 skipped**.
+- Native Windows: **136 passed, 7 skipped** using a short temporary test root.
+- Separate actual Windows-to-WSL publication: **1 passed**, including refusal to overwrite.
+- Package build passed; no duplicate top-level test names; no runtime dependencies added.
+
+Those suite runs select `-m 'not drift'`. Running the seven live-store drift
+checks separately produced **2 passed, 4 skipped, 1 failed**: the pre-existing
+`test_entrypoint_values_are_known` still detects `sdk-cli`. The same failure
+was established on untouched base `7d0bb7c` during the earlier investigation;
+its guard and CLI/desktop classification have not been relaxed in this change.
+
+```bash
+RUN_CLIENT_PROBES=1 uv run --python 3.14 pytest -q -m 'not drift'
+uv run --python 3.10 pytest -q -m 'not drift'
+uv build
+```
+
+Native Windows uses `uv.exe run --no-project --with pytest --with tomli python
+-m pytest` with the same selection. The opt-in WSL probe sets
+`RUN_CLIENT_PROBES=1` and `TELEPORT_WSL_PROBE_ROOT` inside the Windows process;
+WSL environment variables are not assumed to propagate to Windows.
+
+The following commit records these results only; it changes no runtime or tests.
