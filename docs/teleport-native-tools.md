@@ -113,12 +113,12 @@ the real app-server API. The graphical check remains outstanding.
 
 ## Verification
 
-Frozen implementation **`f081c23`**:
+Final runtime/test implementation **`57458ed`** (including the interruption correction):
 
-- Linux Python 3.14: **141 passed, 2 skipped**, including five real-client cases.
-- Python 3.10: **136 passed, 7 skipped**.
-- Native Windows: **136 passed, 7 skipped** using a short temporary test root.
-- Separate actual Windows-to-WSL publication: **1 passed**, including refusal to overwrite.
+- Linux Python 3.14: **143 passed, 2 skipped**, including five real-client cases.
+- Python 3.10: **138 passed, 7 skipped**.
+- Native Windows: **138 passed, 7 skipped** using a short temporary test root.
+- Separate actual Windows-to-WSL publication on `f081c23`: **1 passed**, including refusal to overwrite; the publication code is unchanged in `57458ed`.
 - Package build passed; no duplicate top-level test names; no runtime dependencies added.
 
 Those suite runs select `-m 'not drift'`. Running the seven live-store drift
@@ -139,3 +139,5 @@ Native Windows uses `uv.exe run --no-project --with pytest --with tomli python
 WSL environment variables are not assumed to propagate to Windows.
 
 The following commit records these results only; it changes no runtime or tests.
+
+The initial native-tool candidate `e0da526` passed all nine [CI checks](https://github.com/aviadr1/claude-session-teleporter/actions/runs/36435345214). The later interruption correction is validated separately on the final PR revision.
