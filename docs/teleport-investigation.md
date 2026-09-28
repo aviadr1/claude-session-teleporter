@@ -125,3 +125,57 @@ rename handles that share while retaining the no-overwrite invariant. The
 opt-in `test_real_windows_to_wsl_publication` creates only a temporary synthetic
 file; set `RUN_CLIENT_PROBES=1` and `TELEPORT_WSL_PROBE_ROOT` to a reachable WSL
 temporary directory in the Windows process environment to repeat it.
+
+## Codex desktop project membership
+
+The desktop-bundled **0.158.0-alpha.2.1** protocol adds `project/list`,
+`project/create`, and `thread/metadata/update.projectId`. Its generated schema
+and synthetic real-server probes establish that cwd alone does not assign a
+saved desktop project. `--codex-project auto` now resolves exact destination
+roots or creates a project, registers the destination provider through native
+resume, and verifies membership through `thread/read`. No model turn is sent.
+Project registration is now the default and requires those APIs; explicit
+`--codex-project none` imports only the transcript without a Codex executable. `codex-project` repairs placement independently.
+
+Unlike the original 0.151 probe, this newer server can index a missing provider
+as an empty string. A filesystem scan discovers the rollout but a provider-filtered
+DB-only list omits it until native resume supplies the effective destination
+provider. The project probes verify that list after restart, including a custom
+provider, and preserve active conversation items through repair.
+
+Run the expanded probes with `RUN_CLIENT_PROBES=1` and
+`CODEX_PROJECT_TEST_BIN=/absolute/path/to/desktop-bundled/codex`.
+They use temporary homes, real project APIs and synthetic transcripts. No GUI
+sidebar assertion is made: persisted project membership and backend discovery
+are verified, while the app can still cache its sidebar. The operator's previously
+imported example had been archived before repair; it was left archived.
+
+A subsequent check of the running desktop **26.924.2738.0** found a further UI
+boundary: a project created through its backend was present in `project/list`
+but absent from the app tool's `list_projects`. The installed app maintains a
+separate local project cache and gates thread-assignment synchronization; its
+migration checkpoint was unfinished. Therefore this feature guarantees native
+backend membership, not automatic sidebar grouping on that desktop build.
+Refreshing alone is not a verified remedy. The tool does not rewrite live global
+settings to bypass the app's project handling.
+
+
+## Implementation boundaries
+
+The distributable remains one standard-library Python file. Cross-client code
+has separate layers:
+
+- `decode_claude_session` / `decode_codex_session` understand each source format;
+  `PortableSession` and its validators define the shared conversion contract.
+- `encode_claude_session` / `encode_codex_session` own native destination rows.
+  Tool argument projection is shared without calling a Claude encoder from Codex.
+- `plan_teleport` builds a `TeleportPlan` without writes or client startup.
+  `plan_claude_desktop_metadata` owns Claude's partition/connector integration.
+- `_publish_teleport` owns filesystem transactions. `CodexProjectClient` and
+  `assign_codex_project` own Codex RPC and membership. `apply_teleport` coordinates
+  those effects; CLI functions handle presentation and error reporting.
+
+Existing CLI, round-trip, publication-failure, desktop, and real-client tests
+exercise these boundaries. The default project tests omit the project option;
+transcript-only test journeys explicitly opt out so CI remains independent of
+installed client executables.

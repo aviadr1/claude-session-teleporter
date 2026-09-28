@@ -364,7 +364,7 @@ The metadata is regenerated, not recursively nested. Synthetic discovery
 prefaces are removed on read and regenerated once when necessary.
 
 Enforcement: `with_teleport_metadata`, `restore_teleport_metadata`,
-`validate_portable_message`, `validate_portable_tools`, `_claude_portable`.
+`validate_portable_message`, `validate_portable_tools`, `decode_claude_session`.
 Native sessions remain independently readable if metadata is removed, but
 format-specific fidelity can decrease. Session IDs and message envelopes change
 for every fork; this is semantic round-trip preservation, not byte identity.
@@ -373,3 +373,38 @@ for every fork; this is semantic round-trip preservation, not byte identity.
 > metadata, parallel sibling results, incomplete/duplicate pairs, malformed IDs,
 > and nonaccumulating prefaces. Both successful real-client continuation probes
 > also teleport back and compare the original conversation content.
+
+### T7 — App-supplied browser context is not the user's typed prompt
+
+`split_codex_user_text` recognizes only a complete leading Codex browser-context
+wrapper with the known ambient-state disclaimer and request separator. It leaves
+quoted examples, ordinary headings and native Claude text alone. The shared
+message retains the exact prefix in `codex_context`: Claude content and Codex
+display events use the clean request, while `codex_item` restores the original
+model-context text on return. `validate_portable_message` checks this field and
+metadata restoration still verifies agreement with the native projection.
+
+> `tests/test_prompt_context.py` covers repeated round trips and negative controls.
+> `test_real_claude_resume_model_context` verifies the installed Claude loader sends
+> the clean prompt to the loopback model endpoint.
+
+
+### T8 — Codex desktop project placement uses destination-owned membership
+
+Codex imports default to `--codex-project auto`; `codex-project` repairs existing
+imports through native project APIs. Only explicit `--codex-project none` skips
+project registration. Claude destinations do not start a Codex process. Selection
+matches exact roots (including secondary roots), never ambiguous parents;
+duplicate matches require an explicit ID. An unmatched folder gets a project
+with a deterministic creation key. An assigned chat cannot be moved implicitly.
+`CodexProjectClient` isolates a different target home from the caller's SQLite
+override; `assign_codex_project` verifies cwd and persisted membership.
+Dry runs never launch a server. Publication stays exclusive; a subsequent API
+failure retains the transcript and reports the repair command. Repair never
+reimports conversation, and refuses files outside active destination sessions.
+Registration uses the destination provider and never sends a model turn.
+
+> `tests/test_codex_projects.py`; opt-in
+> `test_real_codex_project_import_and_repair` and
+> `test_real_codex_project_ambiguity_and_recovery` test persisted membership,
+> provider-filtered discovery, create/reuse, ambiguity, repair and restart.

@@ -54,7 +54,7 @@ def test_assistant_first_history_gets_explicit_import_context(tmp_path):
     rows=claude_rows(tmp_path)[1:];rows[0]['parentUuid']=None
     source=write_rows(tmp_path/'source.jsonl',rows)
     dest=tmp_path/'codex'
-    cs.main(['teleport',str(source),'--to','codex','--target-home',str(dest),'--apply'])
+    cs.main(['teleport',str(source),'--to','codex','--codex-project','none','--target-home',str(dest),'--apply'])
     path=next(dest.rglob('*.jsonl'))
     native=native_history(path,'codex')
     assert native[0]['role']=='user'

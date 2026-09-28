@@ -46,6 +46,7 @@ Commands:
   adopt        surface WSL CLI sessions in the desktop app (dry-run by default)
   eject        put a desktop session's transcript where the WSL CLI finds it
   teleport     fork conversation history between Claude and Codex
+  codex-project assign an imported Codex session to a desktop project
   label        give a partition a human-readable name
   guide        print a start-to-finish walkthrough
   skill        print or install a Claude Code skill for this tool
@@ -70,12 +71,14 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import subprocess
 import sys
 import time
 import tempfile
+import threading
 import uuid as _uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -1801,6 +1804,13 @@ Then `{run} teleport /path/to/transcript.jsonl --to codex` (or `--to claude`).
 Dry-run first; `--apply` creates an independent fork. For Claude desktop include
 `--desktop-partition active` on the initial import. For another store use
 `--target-home`; for another working directory use `--cwd`.
+Codex imports default to `--codex-project auto`: reuse an exact destination
+project root or create one. Ambiguous matches require `--codex-project ID`.
+Use the desktop host's session home, optional `--codex-sqlite-home`, and a recent
+`--codex-bin` with project APIs. An existing active import can be assigned with
+`{run} codex-project /path/to/rollout.jsonl --apply`; this does not reimport history.
+Dry runs never start Codex. Use `--codex-project none` for transcript-only imports
+without a Codex executable; these preserve cwd but not project membership.
 
 Inspect the conversion notices: completed tools retain native call/result
 structure; pending or ambiguous exchanges are rejected. Both round trips retain
@@ -2212,6 +2222,8 @@ this one does fork:
 # cross-client teleport: a fresh, resumable fork of portable conversation state
 # ---------------------------------------------------------------------------
 
+AGENT_HOMES = {'claude': ('CLAUDE_CONFIG_DIR', '.claude'), 'codex': ('CODEX_HOME', '.codex')}
+
 TELEPORT_NS = _uuid.UUID('0daa8b13-5778-4cb5-8af4-7fa391f6b0dd')
 IMPORT_PREFACE = '[Import context] Imported conversation history follows.'
 
@@ -2225,6 +2237,7 @@ class PortableMessage:
     tool: dict | None = None
     phase: str | None = None
     synthetic: bool = False
+    codex_context: str = ''  # app-supplied prefix, retained outside Claude's user prompt
 
 
 @dataclass
@@ -2241,7 +2254,9 @@ class PortableSession:
 
 
 def agent_home(agent: str) -> Path:
-    key, folder = ('CODEX_HOME', '.codex') if agent == 'codex' else ('CLAUDE_CONFIG_DIR', '.claude')
+    if agent not in AGENT_HOMES:
+        raise ValueError(f'unsupported client: {agent}')
+    key, folder = AGENT_HOMES[agent]
     return Path(os.environ.get(key) or Path.home() / folder).expanduser()
 
 
@@ -2316,6 +2331,21 @@ def portable_output(value, session: PortableSession):
     return [dict(type='input_text', text=portable_text([block], session)) for block in value]
 
 
+def split_codex_user_text(text: str) -> tuple[str, str]:
+    """T7: unwrap only the complete, leading Codex ambient-browser envelope.
+
+    Never search inside a user's request: quoted examples and user-authored
+    headings must survive. The exact prefix remains available for return trips.
+    """
+    match = re.match(
+        r'\A\s*<in-app-browser-context source="ambient-ui-state">(?P<body>.*?)'
+        r'</in-app-browser-context>[ \t\r\n]*## My request:[ \t]*\r?\n', text, re.DOTALL)
+    disclaimer = "This block is automatically supplied ambient UI state, not part of the user's request."
+    if not match or disclaimer not in match['body'] or not text[match.end():].strip():
+        return text, ''
+    return text[match.end():], text[:match.end()]
+
+
 def append_portable_content(session: PortableSession, role: str, content, phase=None) -> None:
     if isinstance(content, str):
         content = [dict(type='text', text=content)]
@@ -2342,7 +2372,12 @@ def append_portable_content(session: PortableSession, role: str, content, phase=
         else:
             text = portable_text([block], session)
             if text:
-                session.messages.append(PortableMessage(role, text, phase=phase))
+                context = ''
+                if session.agent == 'codex' and role == 'user':
+                    text, context = split_codex_user_text(text)
+                    if context:
+                        session.note('ambient browser context retained in conversion metadata, outside user prompt')
+                session.messages.append(PortableMessage(role, text, phase=phase, codex_context=context))
 
 
 def projection_digest(payload: dict) -> str:
@@ -2388,6 +2423,11 @@ def restore_teleport_metadata(row: dict, payload: dict, session: PortableSession
 def validate_portable_message(message: PortableMessage) -> None:
     if message.role not in ('user', 'assistant', 'tool') or not isinstance(message.text, str):
         raise ValueError('invalid portable message')
+    if not isinstance(message.codex_context, str) or (message.codex_context and (
+        message.role != 'user' or message.tool is not None or message.synthetic or
+        split_codex_user_text(message.codex_context + message.text) != (message.text, message.codex_context)
+    )):
+        raise ValueError('invalid Codex ambient context')
     if message.phase not in (None, 'commentary', 'final_answer'):
         raise ValueError('unsupported assistant phase')
     if not isinstance(message.synthetic, bool) or (message.synthetic and (
@@ -2455,7 +2495,8 @@ def session_title(session: PortableSession) -> str:
     return next((m.text.splitlines()[0] for m in session.messages if m.text.strip()), 'Imported tool history')[:70]
 
 
-def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
+# Claude transcript reader: branch topology and native blocks
+def decode_claude_session(records: list[dict], project_dir: str) -> PortableSession:
     # Follow the last main-chain leaf, including non-message parent nodes. File
     # order alone can replay abandoned branches or subagents as user history.
     for rec in records:
@@ -2564,7 +2605,8 @@ def _claude_portable(records: list[dict], project_dir: str) -> PortableSession:
     return session
 
 
-def _codex_portable(records: list[dict]) -> PortableSession:
+# Codex rollout reader: compaction, model items, and native events
+def decode_codex_session(records: list[dict]) -> PortableSession:
     meta = records[0].get('payload')
     if not isinstance(meta, dict) or not isinstance(meta.get('id'), str):
         raise ValueError('Codex session metadata is missing its id')
@@ -2644,8 +2686,8 @@ def read_portable_session(path: Path) -> PortableSession:
         raise ValueError('source changed while reading; stop the source session and retry')
     if not records:
         raise ValueError('empty transcript')
-    session = (_codex_portable(records) if records[0].get('type') == 'session_meta'
-               else _claude_portable(records, path.parent.name))
+    session = (decode_codex_session(records) if records[0].get('type') == 'session_meta'
+               else decode_claude_session(records, path.parent.name))
     if not session.messages:
         raise ValueError('no portable conversation content')
     validate_portable_tools(session)
@@ -2661,6 +2703,24 @@ def read_portable_session(path: Path) -> PortableSession:
     return session
 
 
+def portable_tool_arguments(tool: dict) -> dict:
+    """Object projection shared by Claude tool_use and Codex display events.
+
+    Conversion metadata retains the original raw arguments for round trips.
+    """
+    if tool['type'] == 'custom_tool_call':
+        return dict(input=tool['input'])
+    try:
+        arguments = json.loads(tool['arguments'])
+    except ValueError:
+        arguments = tool['arguments']
+    return arguments if isinstance(arguments, dict) else dict(input=arguments)
+
+
+# ---------------------------------------------------------------------------
+# Client encoders: native content blocks, envelopes, and display events
+# ---------------------------------------------------------------------------
+
 def claude_block(message: PortableMessage) -> dict:
     tool = message.tool
     if tool is None:
@@ -2674,17 +2734,7 @@ def claude_block(message: PortableMessage) -> dict:
         if 'is_error' in tool:
             block['is_error'] = tool['is_error']
         return block
-    if kind == 'custom_tool_call':
-        arguments = dict(input=tool['input'])
-    else:
-        try:
-            arguments = json.loads(tool['arguments'])
-        except ValueError:
-            arguments = tool['arguments']
-        # Claude requires an object; metadata retains the original raw input.
-        if not isinstance(arguments, dict):
-            arguments = dict(input=arguments)
-    return dict(type='tool_use', id=tool['call_id'], name=tool['name'], input=arguments)
+    return dict(type='tool_use', id=tool['call_id'], name=tool['name'], input=portable_tool_arguments(tool))
 
 
 def codex_item(message: PortableMessage) -> dict:
@@ -2698,55 +2748,55 @@ def codex_item(message: PortableMessage) -> dict:
                               [dict(type='input_text', text='[Tool error]'), *output])
         return item
     item = dict(type='message', role=message.role, content=[dict(
-        type='input_text' if message.role == 'user' else 'output_text', text=message.text)])
+        type='input_text' if message.role == 'user' else 'output_text', text=message.codex_context + message.text)])
     if message.phase is not None:
         item['phase'] = message.phase
     return item
 
 
-def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> list[dict]:
-    validate_portable_tools(session)
-    stamp, rows = session.timestamp, []
-    messages = session.messages
-    if messages[0].role != 'user':
-        messages = [PortableMessage('user', IMPORT_PREFACE,
-                                    synthetic=True), *messages]
-    if target == 'codex':
-        # T5: omit model_provider so discovery uses the destination provider.
-        rows.append(dict(type='session_meta', timestamp=stamp, payload=dict(
-            id=sid, timestamp=stamp, cwd=cwd, originator='claude-session-teleporter',
-            cli_version=__version__, source='cli', history_mode='legacy')))
-        calls = {}
-        for message in messages:
-            item = codex_item(message)
-            rows.append(with_teleport_metadata(dict(type='response_item', timestamp=stamp, payload=item), item, [message]))
-            if message.tool is None:
-                event = dict(type='user_message' if message.role == 'user' else 'agent_message', message=message.text)
-                if message.role == 'user':
-                    event.update(images=[], local_images=[], text_elements=[])
-                else:
-                    event['phase'] = message.phase or 'final_answer'
+def encode_codex_session(messages: list[PortableMessage], sid: str, cwd: str, stamp: str) -> list[dict]:
+    """Codex model history and matching desktop display events."""
+    rows = []
+    # T5: omit model_provider so discovery uses the destination provider.
+    rows.append(dict(type='session_meta', timestamp=stamp, payload=dict(
+        id=sid, timestamp=stamp, cwd=cwd, originator='claude-session-teleporter',
+        cli_version=__version__, source='cli', history_mode='legacy')))
+    calls = {}
+    for message in messages:
+        item = codex_item(message)
+        rows.append(with_teleport_metadata(dict(type='response_item', timestamp=stamp, payload=item), item, [message]))
+        if message.tool is None:
+            event = dict(type='user_message' if message.role == 'user' else 'agent_message', message=message.text)
+            if message.role == 'user':
+                event.update(images=[], local_images=[], text_elements=[])
             else:
-                tool = message.tool
-                if not tool['type'].endswith('_output'):
-                    calls[tool['call_id']] = tool
-                    event = dict(type='mcp_tool_call_begin', call_id=tool['call_id'], turn_id='',
-                                 invocation=dict(server='imported_history', tool=tool['name'],
-                                                 arguments=claude_block(message)['input']))
-                else:
-                    call = calls[tool['call_id']]
-                    output = item['output']
-                    content = [dict(type='text', text=output)] if isinstance(output, str) else [
-                        dict(type='text', text=block['text']) for block in output]
-                    # The installed Codex reader renders MCP events as completed
-                    # generic tool cards. This display namespace registers no tool.
-                    event = dict(type='mcp_tool_call_end', call_id=tool['call_id'], turn_id='',
-                                 invocation=dict(server='imported_history', tool=call['name'],
-                                                 arguments=claude_block(PortableMessage('assistant', tool=call))['input']),
-                                 result={'Ok': dict(content=content, isError=tool.get('is_error', False))},
-                                 duration=dict(secs=0, nanos=0))
-            rows.append(dict(type='event_msg', timestamp=stamp, payload=event))
-        return rows
+                event['phase'] = message.phase or 'final_answer'
+        else:
+            tool = message.tool
+            if not tool['type'].endswith('_output'):
+                calls[tool['call_id']] = tool
+                event = dict(type='mcp_tool_call_begin', call_id=tool['call_id'], turn_id='',
+                             invocation=dict(server='imported_history', tool=tool['name'],
+                                             arguments=portable_tool_arguments(tool)))
+            else:
+                call = calls[tool['call_id']]
+                output = item['output']
+                content = [dict(type='text', text=output)] if isinstance(output, str) else [
+                    dict(type='text', text=block['text']) for block in output]
+                # The installed Codex reader renders MCP events as completed
+                # generic tool cards. This display namespace registers no tool.
+                event = dict(type='mcp_tool_call_end', call_id=tool['call_id'], turn_id='',
+                             invocation=dict(server='imported_history', tool=call['name'],
+                                             arguments=portable_tool_arguments(call)),
+                             result={'Ok': dict(content=content, isError=tool.get('is_error', False))},
+                             duration=dict(secs=0, nanos=0))
+        rows.append(dict(type='event_msg', timestamp=stamp, payload=event))
+    return rows
+
+
+def encode_claude_session(messages: list[PortableMessage], sid: str, cwd: str, stamp: str) -> list[dict]:
+    """Claude's linked role groups and adjacent native tool exchanges."""
+    rows = []
     # Claude requires parallel calls in one assistant message and their results
     # in the following user message. Group by native role, preserving block order.
     groups = []
@@ -2782,6 +2832,23 @@ def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> 
         rows.append(with_teleport_metadata(row, projection, group))
         parent = mid
     return rows
+
+
+def teleport_rows(session: PortableSession, target: str, sid: str, cwd: str) -> list[dict]:
+    """Shared validation/preface policy, followed by a client-specific encoder."""
+    validate_portable_tools(session)
+    messages = session.messages
+    if messages[0].role != 'user':
+        messages = [PortableMessage('user', IMPORT_PREFACE, synthetic=True), *messages]
+    encoders = {'claude': encode_claude_session, 'codex': encode_codex_session}
+    if target not in encoders:
+        raise ValueError(f'unsupported destination client: {target}')
+    return encoders[target](messages, sid, cwd, session.timestamp)
+
+
+# ---------------------------------------------------------------------------
+# Transcript publication: filesystem transactions, independent of either client
+# ---------------------------------------------------------------------------
 
 
 def publish_teleport_file(temporary: Path, destination: Path) -> None:
@@ -2838,89 +2905,327 @@ def _publish_teleport(files: list[tuple[Path, str]], tombstone: Path | None) -> 
             temporary.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Codex desktop integration: native RPC, project selection, and membership
+# ---------------------------------------------------------------------------
+
+def codex_project_environment(home: Path, sqlite_home: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    # T8: an explicit destination must not inherit another host's database.
+    current = native_path(Path(env.get('CODEX_HOME', Path.home()/'.codex')).resolve())
+    if current != native_path(home.resolve()):
+        env.pop('CODEX_SQLITE_HOME', None)
+    env['CODEX_HOME'] = str(home)
+    if sqlite_home:
+        env['CODEX_SQLITE_HOME'] = str(Path(sqlite_home).expanduser().resolve())
+    return env
+
+
+class CodexProjectClient:
+    """Short-lived local JSON-RPC client; never starts a model turn."""
+
+    def __init__(self, home: Path, binary: str, sqlite_home: str | None = None):
+        env = codex_project_environment(home, sqlite_home)
+        self.process = subprocess.Popen([binary, 'app-server'], env=env, stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        text=True, encoding='utf-8')
+        self.output = queue.Queue()
+        self.sequence = 0
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                value = json.loads(line)
+                if 'id' in value and ('result' in value or 'error' in value):
+                    self.output.put(value)
+        except (ValueError, OSError):
+            pass  # rpc reports the closed/invalid stream; never print protocol data.
+        finally:
+            self.output.put(None)
+
+    def __enter__(self):
+        try:
+            self.rpc('initialize', {'clientInfo': {'name': 'claude_session_teleporter', 'version': __version__},
+                                    'capabilities': {'experimentalApi': True}})
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, *unused):
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+        self.reader.join(timeout=5)
+        self.process.stdin.close()
+        self.process.stdout.close()
+
+    def rpc(self, method: str, params: dict) -> dict:
+        self.sequence += 1
+        self.process.stdin.write(json.dumps(dict(id=self.sequence, method=method, params=params))+'\n')
+        self.process.stdin.flush()
+        try:
+            result = self.output.get(timeout=30)
+        except queue.Empty:
+            raise ValueError(f'Codex {method} timed out') from None
+        if result is None:
+            raise ValueError(f'Codex exited during {method}; check --codex-bin and destination configuration')
+        if result.get('id') != self.sequence or 'error' in result:
+            raise ValueError(f'Codex {method} failed: {result.get("error", "unexpected response")}. '
+                             'Project placement requires a Codex app server with project APIs.')
+        return result['result']
+
+    def projects(self) -> list[dict]:
+        projects, cursor, seen = [], None, set()
+        while True:
+            response = self.rpc('project/list', {'limit': 100, 'cursor': cursor})
+            projects.extend(response['data'])
+            cursor = response.get('nextCursor')
+            if not cursor:
+                return projects
+            if cursor in seen:
+                raise ValueError('Codex returned a repeated project-list cursor')
+            seen.add(cursor)
+
+
+def select_codex_project(projects: list[dict], cwd: str, selector: str) -> dict | None:
+    """T8: match exact roots, never guess from overlapping ancestor folders."""
+    if selector == 'auto':
+        root = native_path(Path(cwd).resolve())
+        matches = [p for p in projects if any(native_path(Path(r['path']).resolve()) == root for r in p['roots'])]
+    else:
+        matches = [p for p in projects if p['id'] == selector]
+        if not matches:
+            matches = [p for p in projects if p['name'] == selector]
+        if not matches:
+            raise ValueError(f'Codex project not found: {selector}')
+    if len(matches) > 1:
+        raise ValueError('ambiguous Codex project; choose an ID with --codex-project: ' +
+                         ', '.join(f'{p["name"]} ({p["id"]})' for p in matches))
+    return matches[0] if matches else None
+
+
+def assign_codex_project(client: CodexProjectClient, sid: str, cwd: str,
+                         project: dict | None, *, register: bool = False) -> dict:
+    # Native resume registers the destination provider for DB-only desktop lists.
+    # No turn/start, source configuration, or historical tool execution occurs.
+    thread = client.rpc('thread/read', {'threadId': sid})['thread']
+    if thread.get('cwd') != cwd:
+        raise ValueError('Codex thread cwd differs from the import; project assignment refused')
+    if register or not thread.get('modelProvider'):
+        config = client.rpc('config/read', {'cwd': cwd, 'includeLayers': False})['config']
+        thread = client.rpc('thread/resume', {'threadId': sid,
+                            'modelProvider': config.get('model_provider') or 'openai'})['thread']
+    if thread.get('cwd') != cwd:
+        raise ValueError('Codex thread cwd differs from the import; project assignment refused')
+    if thread.get('projectId'):
+        if project is not None and thread['projectId'] != project['id']:
+            raise ValueError('thread already belongs to another Codex project; left unchanged')
+        project = client.rpc('project/read', {'projectId': thread['projectId']})['project']
+        print(f'Codex project already assigned: {project["name"]} ({project["id"]})')
+        return project
+    if project is None:
+        project = client.rpc('project/create', {
+            'idempotencyKey': 'claude-session-teleporter:' + str(_uuid.uuid5(TELEPORT_NS, str(Path(cwd).resolve()))),
+            'name': Path(cwd).name or cwd, 'roots': [{'path': cwd}],
+        })['project']
+    client.rpc('thread/metadata/update', {'threadId': sid, 'projectId': project['id']})
+    verified = client.rpc('thread/read', {'threadId': sid})['thread']
+    if verified.get('projectId') != project['id']:
+        raise ValueError('Codex did not retain the requested project assignment')
+    print(f'Codex project: {project["name"]} ({project["id"]})')
+    return project
+
+
+def cmd_codex_project(args) -> int:
+    """Repair placement independently of the no-overwrite transcript importer."""
+    try:
+        home = native_path(Path(args.target_home).expanduser().resolve() if args.target_home else agent_home('codex').resolve())
+        path = native_path(Path(args.transcript).expanduser().resolve())
+        # T8: never address a same-ID session in a different destination store.
+        if home/'sessions' not in path.parents:
+            raise ValueError('rollout must be inside the destination CODEX_HOME/sessions')
+        with path.open(encoding='utf-8') as stream:
+            header = json.loads(stream.readline())
+        if header.get('type') != 'session_meta':
+            raise ValueError('expected a Codex rollout')
+        sid, cwd = header['payload']['id'], header['payload']['cwd']
+        print(f'Assign Codex session {sid} ({cwd}) to project: {args.codex_project}')
+        if not args.apply:
+            print('DRY RUN. Project resolution is deferred; no app server started and nothing written.')
+            return 0
+        with CodexProjectClient(home, args.codex_bin, args.codex_sqlite_home) as client:
+            project = select_codex_project(client.projects(), cwd, args.codex_project)
+            assign_codex_project(client, sid, cwd, project)
+        return 0
+    except (OSError, ValueError, KeyError) as exc:
+        die(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Import planning: read-only source, destination, and desktop metadata decisions
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TeleportPlan:
+    source: Path
+    session: PortableSession
+    target_agent: str
+    home: Path
+    cwd: str
+    session_id: str
+    transcript: Path
+    files: list[tuple[Path, str]]
+    existing: list[Path]
+    tombstone: Path | None
+    codex_project: str | None
+
+    def already_exists(self) -> bool:
+        # T1/T3: never replace an evolved fork or silently fill a partial import.
+        if not (self.existing or any(p.exists() or p.is_symlink() for p, _ in self.files)):
+            return False
+        if len(self.files) > 1 and not all(p.is_file() for p, _ in self.files):
+            raise ValueError('incomplete desktop import: transcript and metadata are not both present; '
+                             'existing files were preserved. Inspect the destination before retrying')
+        return True
+
+
+def plan_claude_desktop_metadata(session: PortableSession, sid: str, home: Path,
+                                cwd: str, target: Path, host, partition: str) -> tuple[tuple[Path, str], Path]:
+    """Use only destination-owned Claude connectors and reset donor permissions."""
+    if not (host and host.is_wsl) and home / 'projects' != native_path(PROJECTS_DIR.resolve()):
+        raise ValueError('desktop target must use this machine\'s Claude projects store (or --target-host wsl:NAME)')
+    parts = load_partitions()
+    dst = resolve_partition(parts, partition)
+    c = CliSession(host=host or WINDOWS_HOST, transcript=target, cli_id=sid,
+                   project_dir=target.parent.name, cwd=cwd, origin_cwd=cwd,
+                   title=session_title(session),
+                   created_at=_ms(session.timestamp), last_activity=int(time.time() * 1000))
+    data, _ = build_adopted(c, adopt_template(dst), dst, connector_names(parts))
+    # Never inherit donor approvals, worktrees, or runtime session settings.
+    data.update(alwaysAllowedReasons=[], sessionPermissionUpdates=[], spawnSeed={})
+    if not (host and host.is_wsl):
+        data.pop('wslConfig', None)
+        data.pop('sshRemoteTranscriptPath', None)
+    metadata = dst.path / f'{c.session_id}.json'
+    tombstone = dst.path / f'deleted_{c.uuid}'
+    if tombstone.exists():
+        raise ValueError('destination session has a deletion tombstone')
+    return (metadata, json.dumps(data, ensure_ascii=False, indent=2) + '\n'), tombstone
+
+
+def plan_teleport(args) -> TeleportPlan:
+    """Build a complete import without creating files or launching client processes."""
+    if args.to != 'codex' and (args.codex_project or args.codex_sqlite_home or args.codex_bin != 'codex'):
+        raise ValueError('Codex project options require --to codex')
+    project_selector = None
+    if args.to == 'codex' and args.codex_project != 'none':
+        project_selector = args.codex_project or 'auto'
+    source = Path(args.transcript).expanduser()
+    session = read_portable_session(source)
+    if session.agent == args.to:
+        raise ValueError(f'source is already {args.to}; teleport is for crossing clients')
+    if args.target_host and (args.to != 'claude' or args.target_home):
+        raise ValueError('--target-host is for Claude and cannot be combined with --target-home')
+    if args.desktop_partition and args.to != 'claude':
+        raise ValueError('--desktop-partition is only for Claude; Codex uses its sessions store')
+    host = resolve_host(args.target_host) if args.target_host else None
+    home = native_path((host.projects.parent if host else
+                        Path(args.target_home).expanduser() if args.target_home else agent_home(args.to)).resolve())
+    cwd = args.cwd or session.cwd
+    is_absolute = cwd.startswith('/') if host and host.is_wsl else (Path(cwd).is_absolute() or win_to_wsl_path(cwd))
+    if not cwd or not is_absolute:
+        raise ValueError('destination cwd must be absolute; supply --cwd')
+    reachable = host.root / cwd.lstrip('/') if host and host.is_wsl else Path(cwd)
+    if os.name != 'nt' and win_to_wsl_path(cwd):
+        reachable = Path(win_to_wsl_path(cwd))
+    if not reachable.is_dir():
+        raise ValueError('destination working directory is unavailable; supply a reachable --cwd')
+    sid = str(_uuid.uuid5(TELEPORT_NS, f'{session.agent}:{session.session_id}:{args.to}:{cwd}'))
+    stamp = session.timestamp
+    if args.to == 'codex':
+        target = home / 'sessions' / stamp[:10].replace('-', '/') / f'rollout-{stamp[:19].replace(":", "-")}-{sid}.jsonl'
+        existing = [p for folder in ('sessions', 'archived_sessions')
+                    for p in (home / folder).rglob(f'*{sid}.jsonl')]
+    else:
+        target = home / 'projects' / encode_cwd(cwd) / f'{sid}.jsonl'
+        existing = list((home / 'projects').glob(f'*/{sid}.jsonl'))
+    files = [(target, ''.join(json.dumps(r, ensure_ascii=False) + '\n'
+                             for r in teleport_rows(session, args.to, sid, cwd)))]
+    tombstone = None
+    if args.desktop_partition:
+        metadata, tombstone = plan_claude_desktop_metadata(
+            session, sid, home, cwd, target, host, args.desktop_partition)
+        files.append(metadata)
+    return TeleportPlan(source=source, session=session, target_agent=args.to, home=home,
+                        cwd=cwd, session_id=sid, transcript=target, files=files,
+                        existing=existing, tombstone=tombstone, codex_project=project_selector)
+
+
+# ---------------------------------------------------------------------------
+# Import execution and CLI presentation
+# ---------------------------------------------------------------------------
+
+def apply_teleport(plan: TeleportPlan, binary: str, sqlite_home: str | None) -> None:
+    """Publish once; keep native project registration outside transcript conversion."""
+    if plan.codex_project is None:
+        _publish_teleport(plan.files, plan.tombstone)
+        return
+    with CodexProjectClient(plan.home, binary, sqlite_home) as client:
+        project = select_codex_project(client.projects(), plan.cwd, plan.codex_project)
+        _publish_teleport(plan.files, plan.tombstone)
+        try:
+            assign_codex_project(client, plan.session_id, plan.cwd, project, register=True)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f'Imported transcript retained at {plan.transcript}, but project placement failed: {exc}. '
+                             'Repair with codex-project ROLLOUT using the same destination options and --apply') from exc
+
+
+def print_teleport_plan(plan: TeleportPlan) -> None:
+    session = plan.session
+    print(f'{session.agent} -> {plan.target_agent}: {len(session.messages)} messages (new independent fork)')
+    print(f'Source: {plan.source}\nDestination: {plan.transcript}\nSession: {plan.session_id}\nWorking directory: {plan.cwd}')
+    for note, count in session.notices.items():
+        print(f'  {count}x {note}')
+    if session.messages[0].role != 'user':
+        print('  Added a labeled import preface for assistant-first history.')
+    print('Project files and source permissions are not copied. Completed tools retain native call/result structure.')
+    if plan.codex_project:
+        print(f'Codex project: {plan.codex_project} (resolve on apply; auto reuses an exact root or creates a project)')
+
+
+def print_teleport_resume(plan: TeleportPlan) -> None:
+    print(f'Created {plan.session_id}. Resume in the target environment:')
+    command = 'codex resume' if plan.target_agent == 'codex' else 'claude --resume'
+    print(f'  {command} {plan.session_id}')
+    env_key = AGENT_HOMES[plan.target_agent][0]
+    print(f'Run from {plan.cwd}; use the destination {env_key}={plan.home}.')
+    if plan.target_agent == 'codex':
+        print('Desktop: use the same CODEX_HOME and host. ' +
+              ('Backend project assignment verified; legacy desktop builds may still need app-side project selection.' if plan.codex_project else
+               'Use codex-project to assign this transcript-only import to a project.'))
+    elif len(plan.files) > 1:
+        print('Desktop: switch accounts or restart Claude to reload its session list.')
+    else:
+        print('For Claude desktop visibility, include --desktop-partition on the initial import, or use adopt for WSL.')
+
+
 def cmd_teleport(args) -> int:
     try:
-        source = Path(args.transcript).expanduser()
-        session = read_portable_session(source)
-        if session.agent == args.to:
-            raise ValueError(f'source is already {args.to}; teleport is for crossing clients')
-        if args.target_host and (args.to != 'claude' or args.target_home):
-            raise ValueError('--target-host is for Claude and cannot be combined with --target-home')
-        if args.desktop_partition and args.to != 'claude':
-            raise ValueError('--desktop-partition is only for Claude; Codex uses its sessions store')
-        host = resolve_host(args.target_host) if args.target_host else None
-        env_key = 'CODEX_HOME' if args.to == 'codex' else 'CLAUDE_CONFIG_DIR'
-        home = native_path((host.projects.parent if host else
-                            Path(args.target_home).expanduser() if args.target_home else agent_home(args.to)).resolve())
-        cwd = args.cwd or session.cwd
-        is_absolute = cwd.startswith('/') if host and host.is_wsl else (Path(cwd).is_absolute() or win_to_wsl_path(cwd))
-        if not cwd or not is_absolute:
-            raise ValueError('destination cwd must be absolute; supply --cwd')
-        reachable = host.root / cwd.lstrip('/') if host and host.is_wsl else Path(cwd)
-        if os.name != 'nt' and win_to_wsl_path(cwd):
-            reachable = Path(win_to_wsl_path(cwd))
-        if not reachable.is_dir():
-            raise ValueError('destination working directory is unavailable; supply a reachable --cwd')
-        sid = str(_uuid.uuid5(TELEPORT_NS, f'{session.agent}:{session.session_id}:{args.to}:{cwd}'))
-        stamp = session.timestamp
-        if args.to == 'codex':
-            target = home / 'sessions' / stamp[:10].replace('-', '/') / f'rollout-{stamp[:19].replace(":", "-")}-{sid}.jsonl'
-            existing = [p for folder in ('sessions', 'archived_sessions')
-                        for p in (home / folder).rglob(f'*{sid}.jsonl')]
-        else:
-            target = home / 'projects' / encode_cwd(cwd) / f'{sid}.jsonl'
-            existing = list((home / 'projects').glob(f'*/{sid}.jsonl'))
-        files = [(target, ''.join(json.dumps(r, ensure_ascii=False) + '\n'
-                                 for r in teleport_rows(session, args.to, sid, cwd)))]
-        tombstone = None
-        if args.desktop_partition:
-            if not (host and host.is_wsl) and home / 'projects' != native_path(PROJECTS_DIR.resolve()):
-                raise ValueError('desktop target must use this machine\'s Claude projects store (or --target-host wsl:NAME)')
-            parts = load_partitions()
-            dst = resolve_partition(parts, args.desktop_partition)
-            c = CliSession(host=host or WINDOWS_HOST, transcript=target, cli_id=sid,
-                           project_dir=target.parent.name, cwd=cwd, origin_cwd=cwd,
-                           title=session_title(session),
-                           created_at=_ms(stamp), last_activity=int(time.time() * 1000))
-            data, _ = build_adopted(c, adopt_template(dst), dst, connector_names(parts))
-            # Never inherit donor approvals, worktrees, or runtime session settings.
-            data.update(alwaysAllowedReasons=[], sessionPermissionUpdates=[], spawnSeed={})
-            if not (host and host.is_wsl):
-                data.pop('wslConfig', None)
-                data.pop('sshRemoteTranscriptPath', None)
-            metadata = dst.path / f'{c.session_id}.json'
-            tombstone = dst.path / f'deleted_{c.uuid}'
-            if tombstone.exists():
-                raise ValueError('destination session has a deletion tombstone')
-            files.append((metadata, json.dumps(data, ensure_ascii=False, indent=2) + '\n'))
-        print(f'{session.agent} -> {args.to}: {len(session.messages)} messages (new independent fork)')
-        print(f'Source: {source}\nDestination: {target}\nSession: {sid}\nWorking directory: {cwd}')
-        for note, count in session.notices.items():
-            print(f'  {count}x {note}')
-        if session.messages[0].role != 'user':
-            print('  Added a labeled import preface for assistant-first history.')
-        print('Project files and source permissions are not copied. Completed tools retain native call/result structure.')
-        # An existing transcript may have been resumed/modified: never replace it
-        # or add metadata to a half-existing import based on assumptions.
-        if existing or any(p.exists() or p.is_symlink() for p, _ in files):
-            if len(files) > 1 and not all(p.is_file() for p, _ in files):
-                raise ValueError('incomplete desktop import: transcript and metadata are not both present; '
-                                 'existing files were preserved. Inspect the destination before retrying')
+        plan = plan_teleport(args)
+        print_teleport_plan(plan)
+        if plan.already_exists():
             print('Destination already exists; left untouched (including archived imports).')
-            return 0
-        if not args.apply:
+        elif not args.apply:
             print('DRY RUN. Nothing written. Re-run with --apply to create this fork.')
-            return 0
-        _publish_teleport(files, tombstone)
-        print(f'Created {sid}. Resume in the target environment:')
-        print(f'  codex resume {sid}' if args.to == 'codex' else f'  claude --resume {sid}')
-        print(f'Run from {cwd}; use the destination {env_key}={home}.')
-        if args.to == 'codex':
-            print('Desktop: use the same CODEX_HOME and host, then refresh/restart the app to discover the session.')
-        elif args.desktop_partition:
-            print('Desktop: switch accounts or restart Claude to reload its session list.')
         else:
-            print('For Claude desktop visibility, include --desktop-partition on the initial import, or use adopt for WSL.')
+            apply_teleport(plan, args.codex_bin, args.codex_sqlite_home)
+            print_teleport_resume(plan)
         return 0
     except (OSError, ValueError) as exc:
         die(str(exc))
@@ -3045,7 +3350,7 @@ def main(argv: list[str] | None = None) -> int:
     tp = sub.add_parser(
         "teleport", help="fork conversation history between Claude and Codex",
         description="Convert a Claude transcript or Codex rollout into a new resumable session. "
-        "Dry run by default. Tool evidence becomes text; permissions and credentials never transfer.",
+        "Dry run by default. Tools retain native structure; permissions and credentials never transfer.",
     )
     tp.add_argument("transcript", help="source Claude JSONL transcript or Codex rollout file")
     tp.add_argument("--to", required=True, choices=("claude", "codex"))
@@ -3055,6 +3360,21 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--desktop-partition", metavar="SEL", help="also create Claude desktop metadata, e.g. active")
     tp.add_argument("--apply", action="store_true", help="actually create the fork (default is dry run)")
     tp.set_defaults(fn=cmd_teleport)
+
+    cp = sub.add_parser('codex-project', help='assign an existing Codex rollout to a desktop project')
+    cp.add_argument('transcript', help='existing rollout inside the destination CODEX_HOME/sessions')
+    cp.add_argument('--target-home', metavar='DIR', help='destination CODEX_HOME')
+    cp.add_argument('--apply', action='store_true', help='assign the project (default is dry run)')
+    cp.set_defaults(fn=cmd_codex_project)
+    for parser in (tp, cp):
+        parser.add_argument('--codex-project', metavar='auto|ID|NAME' if parser is cp else 'auto|none|ID|NAME',
+                            default='auto' if parser is cp else None,
+                            help='Codex imports default to auto: reuse an exact folder match or create a project; '
+                                 'use none with teleport for transcript-only import')
+        parser.add_argument('--codex-bin', default='codex', metavar='PATH',
+                            help='Codex executable with project APIs (use the desktop-bundled version if needed)')
+        parser.add_argument('--codex-sqlite-home', metavar='DIR',
+                            help='destination CODEX_SQLITE_HOME when the desktop uses a separate index')
 
     lp = sub.add_parser(
         "label",

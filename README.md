@@ -63,6 +63,9 @@ claude-sessions sessions --agent codex -n 10
 claude-sessions teleport /path/to/claude-session.jsonl --to codex
 claude-sessions teleport /path/to/claude-session.jsonl --to codex --apply
 
+# Transcript-only Codex import, without launching Codex or assigning a project
+claude-sessions teleport /path/to/claude-session.jsonl --to codex --codex-project none --apply
+
 # Codex -> Claude CLI
 claude-sessions teleport /path/to/rollout.jsonl --to claude --apply
 
@@ -86,6 +89,42 @@ rollouts). Windows and WSL stores are separate. When their path spellings
 differ, supply `--cwd` in the destination's syntax; the working tree must
 already exist. The tool does not move files or rewrite paths inside messages.
 
+Codex imports **default to `--codex-project auto`** for project membership. The tool
+reuses a project with an exact working-directory root or creates one for that
+folder. It never guesses from a parent folder; multiple exact matches require
+`--codex-project ID` (or a unique project name). This uses Codex's native project
+APIs and registers the destination provider without sending a model prompt.
+A recent Codex executable with project APIs is required; use `--codex-bin PATH`
+for the desktop-bundled executable if your CLI is older. To import only the
+transcript without a Codex executable, explicitly use `--codex-project none`;
+this preserves the cwd but skips project membership. Codex → Claude imports
+do not start Codex or resolve Codex projects.
+
+To assign an already imported session without reimporting its conversation:
+
+```bash
+claude-sessions codex-project /path/to/.codex/sessions/.../rollout.jsonl --apply
+```
+
+Both commands support `--target-home`, `--codex-bin`, and
+`--codex-sqlite-home DIR` for desktops whose `CODEX_SQLITE_HOME` differs from
+`CODEX_HOME`. Use the destination host's paths and binary: on Windows/WSL,
+the desktop may use `/mnt/c/Users/NAME/.codex` for sessions and a separate WSL
+index. These paths vary by machine. A different `--target-home`
+does not inherit the current host's database override.
+
+Dry runs never start Codex or resolve/create projects. On apply, project lookup
+happens before transcript publication. If later registration fails, the error
+identifies the retained transcript; `codex-project` repairs placement without
+replacing it. Existing assignments are preserved; archived sessions are refused.
+**Desktop limitation:** persisted backend membership is verified. Some desktop
+builds still keep a separate local project registry and gate synchronization of
+thread assignments. On those builds, a new backend project may remain absent
+from the sidebar even after refreshing; add/select the matching project in the
+app. This command does not rewrite the live app's global settings or claim
+verified sidebar placement. Project membership is destination-local: foreign project IDs and project settings are
+not copied, and round trips resolve the destination folder again.
+
 **What transfers:** active user/assistant text and completed native tool calls
 and results, including their IDs, names, arguments, output and order. Claude
 uses `tool_use`/`tool_result`; Codex uses function/custom call and output items.
@@ -95,7 +134,10 @@ namespace. Historical tools are not registered or rerun.
 Both round trips—Claude → Codex → Claude and Codex → Claude → Codex—preserve
 supported conversation content. Conversion metadata retains distinctions the
 other format cannot express directly, such as custom tool input, argument JSON
-formatting, error flags and assistant phases. It is checked against the native
+formatting, error flags and assistant phases. Codex ambient browser wrappers are
+kept in conversion metadata, outside Claude user prompts, and restored on return
+to Codex. Quoted examples and user-authored headings are preserved. Metadata is
+checked against the native
 record before reuse; changed native content takes precedence. New session IDs
 and message envelopes are expected, and clients that discard this metadata can
 reduce return-trip fidelity. See the [native-tool investigation and tests](docs/teleport-native-tools.md).

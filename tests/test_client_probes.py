@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from conftest import cs
 from teleport_support import (ANSWER, PROMPT, claude_rows, codex_rows, write_rows,
-                              tool_rows, TOOL_OUTPUT, CALL_ID, teleport, native_history, parallel_branch_rows)
+                              tool_rows, TOOL_OUTPUT, CALL_ID, teleport, native_history, parallel_branch_rows, BROWSER_PREFIX)
 
 pytestmark = pytest.mark.skipif(os.environ.get('RUN_CLIENT_PROBES') != '1', reason='opt-in real client probes')
 
@@ -101,8 +101,8 @@ def clean_env(home):
 
 
 @contextmanager
-def app_server(home, cwd, base_url):
-    binary = shutil.which('codex')
+def app_server(home, cwd, base_url, binary=None):
+    binary = binary or shutil.which('codex')
     if not binary:
         pytest.skip('codex is not installed')
     env = clean_env(home)
@@ -185,7 +185,7 @@ def test_real_codex_discovery_read_resume_and_model_context(tmp_path, assistant_
         rows[0]['parentUuid'] = None
     source = write_rows(tmp_path/'claude.jsonl', rows)
     home = tmp_path/'codex'
-    assert cs.main(['teleport', str(source), '--to', 'codex', '--target-home', str(home), '--apply']) == 0
+    assert cs.main(['teleport', str(source), '--to', 'codex', '--codex-project', 'none', '--target-home', str(home), '--apply']) == 0
     imported = cs.read_portable_session(next(home.rglob('*.jsonl')))
     with capture_api() as (url, requests):
         for restart in range(2):
@@ -210,7 +210,9 @@ def test_real_codex_discovery_read_resume_and_model_context(tmp_path, assistant_
 
 def test_real_claude_resume_model_context(tmp_path):
     cwd = tmp_path/'project'; cwd.mkdir()
-    source = write_rows(tmp_path/'codex.jsonl', codex_rows(cwd))
+    rows = codex_rows(cwd)
+    rows[1]['payload']['content'][0]['text'] = BROWSER_PREFIX + PROMPT
+    source = write_rows(tmp_path/'codex.jsonl', rows)
     home = tmp_path/'claude'
     assert cs.main(['teleport', str(source), '--to', 'claude', '--target-home', str(home), '--apply']) == 0
     imported = cs.read_portable_session(next(home.rglob('*.jsonl')))
@@ -220,6 +222,8 @@ def test_real_claude_resume_model_context(tmp_path):
         request = requests.get(timeout=2)
         messages = request['messages']
         assert PROMPT in json.dumps(messages[0]) and messages[0]['role'] == 'user'
+        assert 'in-app-browser-context' not in json.dumps(messages)
+        assert '## My request:' not in json.dumps(messages)
         assert ANSWER in json.dumps(messages[1]) and messages[1]['role'] == 'assistant'
 
 
@@ -294,3 +298,128 @@ def test_real_claude_tool_evidence_and_completed_turn_survive_restart(tmp_path):
 
     returned=teleport(path,'codex',tmp_path/'returned')
     assert native_history(returned,'codex')[:len(expected)]==expected
+
+
+@pytest.mark.skipif(not os.environ.get('CODEX_PROJECT_TEST_BIN'), reason='requires a Codex binary with project APIs')
+@pytest.mark.parametrize('existing', [False, True])
+def test_real_codex_project_import_and_repair(tmp_path, monkeypatch, existing):
+    """T8: native project membership survives restart and repair retains conversation."""
+    binary = os.environ['CODEX_PROJECT_TEST_BIN']
+    home = tmp_path/'codex'; home.mkdir()
+    cwd = tmp_path/'repo'; cwd.mkdir()
+    for key in list(os.environ):
+        if key.startswith(('CODEX_', 'OPENAI_', 'ANTHROPIC_')):
+            monkeypatch.delenv(key)
+    source = write_rows(tmp_path/'source.jsonl', claude_rows(cwd))
+    with capture_api() as (url, requests):
+        provider = 'project-test' if existing else 'openai'
+        if existing:
+            (home/'config.toml').write_text(
+                'model_provider = "project-test"\n[model_providers.project-test]\n'
+                f'name = "Synthetic"\nbase_url = "{url}"\nwire_api = "responses"\n')
+        wrong_db = tmp_path/'wrong-index'
+        monkeypatch.setenv('CODEX_SQLITE_HOME', str(wrong_db))
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            original = None
+            if existing:
+                original = rpc('project/create', {'idempotencyKey': 'existing', 'name': 'Existing repo',
+                                                  'roots': [{'path': str(cwd)}]})['project']
+        argv = ['teleport', str(source), '--to', 'codex', '--target-home', str(home),
+                '--codex-bin', binary, '--apply']
+        assert cs.main(argv) == 0
+        rollout = next((home/'sessions').rglob('*.jsonl'))
+        sid = cs.read_portable_session(rollout).session_id
+        conversation = native_history(rollout, 'codex')
+        before = rollout.read_bytes()
+        assert cs.main(argv) == 0
+        assert rollout.read_bytes() == before
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            projects = rpc('project/list', {})['data']
+            assert len(projects) == 1
+            selected = projects[0]
+            if existing:
+                assert selected['id'] == original['id']
+            assert selected['roots'] == [{'path': str(cwd)}]
+            listing = rpc('thread/list', {'projectId': selected['id'], 'useStateDbOnly': True,
+                                         'modelProviders': [provider]})['data']
+            assert sid in [t['id'] for t in listing]
+            assert rpc('thread/read', {'threadId': sid})['thread']['cwd'] == str(cwd)
+            rpc('thread/metadata/update', {'threadId': sid, 'projectId': ''})
+        assert cs.main(['codex-project', str(rollout), '--target-home', str(home),
+                        '--codex-bin', binary, '--apply']) == 0
+        assert native_history(rollout, 'codex') == conversation
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            assert rpc('thread/read', {'threadId': sid})['thread']['projectId'] == selected['id']
+            assert len(rpc('project/list', {})['data']) == 1
+        assert requests.empty()  # Project registration never invokes the model.
+        assert not wrong_db.exists()
+
+
+@pytest.mark.skipif(not os.environ.get('CODEX_PROJECT_TEST_BIN'), reason='requires a Codex binary with project APIs')
+def test_real_codex_project_ambiguity_and_recovery(tmp_path, monkeypatch):
+    binary = os.environ['CODEX_PROJECT_TEST_BIN']
+    home = tmp_path/'codex'; home.mkdir()
+    cwd = tmp_path/'repo'; cwd.mkdir()
+    for key in list(os.environ):
+        if key.startswith(('CODEX_', 'OPENAI_', 'ANTHROPIC_')):
+            monkeypatch.delenv(key)
+    source = write_rows(tmp_path/'source.jsonl', claude_rows(cwd))
+    with capture_api() as (url, requests):
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            projects = [rpc('project/create', {'idempotencyKey': str(i), 'name': 'Same name',
+                        'roots': [{'path': str(cwd)}]})['project'] for i in range(2)]
+        argv = ['teleport', str(source), '--to', 'codex', '--target-home', str(home),
+                '--codex-bin', binary, '--apply']
+        with pytest.raises(SystemExit):
+            cs.main([*argv, '--codex-project', 'auto'])
+        assert not list((home/'sessions').rglob('*.jsonl'))
+        assert cs.main([*argv, '--codex-project', projects[0]['id']]) == 0
+        rollout = next((home/'sessions').rglob('*.jsonl'))
+        sid = cs.read_portable_session(rollout).session_id
+        repair = ['codex-project', str(rollout), '--target-home', str(home),
+                  '--codex-bin', binary, '--codex-project', projects[0]['id'], '--apply']
+        before = rollout.read_bytes()
+        assert cs.main(repair) == 0
+        assert rollout.read_bytes() == before
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            rpc('thread/metadata/update', {'threadId': sid, 'projectId': projects[1]['id']})
+        with pytest.raises(SystemExit):
+            cs.main(repair)
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            assert rpc('thread/read', {'threadId': sid})['thread']['projectId'] == projects[1]['id']
+        assert requests.empty()
+
+
+@pytest.mark.skipif(not os.environ.get('CODEX_PROJECT_TEST_BIN'), reason='requires a Codex binary with project APIs')
+def test_real_codex_project_partial_failure_is_repairable(tmp_path, monkeypatch):
+    binary = os.environ['CODEX_PROJECT_TEST_BIN']
+    home = tmp_path/'codex'; home.mkdir()
+    cwd = tmp_path/'repo'; cwd.mkdir()
+    for key in list(os.environ):
+        if key.startswith(('CODEX_', 'OPENAI_', 'ANTHROPIC_')):
+            monkeypatch.delenv(key)
+    source = write_rows(tmp_path/'source.jsonl', claude_rows(cwd))
+    original_rpc = cs.CodexProjectClient.rpc
+
+    def fail_assignment(client, method, params):
+        if method == 'thread/metadata/update':
+            raise ValueError('synthetic unavailable metadata endpoint')
+        return original_rpc(client, method, params)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(cs.CodexProjectClient, 'rpc', fail_assignment)
+        with pytest.raises(SystemExit):
+            cs.main(['teleport', str(source), '--to', 'codex', '--target-home', str(home),
+                     '--codex-bin', binary, '--codex-project', 'auto', '--apply'])
+    rollout = next((home/'sessions').rglob('*.jsonl'))
+    history = native_history(rollout, 'codex')
+    assert cs.main(['codex-project', str(rollout), '--target-home', str(home),
+                    '--codex-bin', binary, '--apply']) == 0
+    assert native_history(rollout, 'codex') == history
+    with capture_api() as (url, requests):
+        with app_server(home, cwd, url, binary=binary) as (rpc, _):
+            projects = rpc('project/list', {})['data']
+            assert len(projects) == 1
+            assert rpc('thread/list', {'projectId': projects[0]['id'], 'useStateDbOnly': True,
+                                      'modelProviders': ['openai']})['data']
+        assert requests.empty()

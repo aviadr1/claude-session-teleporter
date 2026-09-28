@@ -61,7 +61,9 @@ def tool_rows(agent, cwd):
 
 
 def teleport(source, target, home):
-    assert cs.main(['teleport',str(source),'--to',target,'--target-home',str(home),'--apply']) == 0
+    # Transcript-format journeys are independent of the installed Codex binary.
+    placement = ['--codex-project', 'none'] if target == 'codex' else []
+    assert cs.main(['teleport',str(source),'--to',target,'--target-home',str(home),'--apply', *placement]) == 0
     files = list(home.rglob('*.jsonl'))
     assert len(files) == 1
     return files[0]
@@ -94,3 +96,14 @@ def parallel_branch_rows(cwd):
     final={**assistant,'uuid':str(uuid.uuid4()),'parentUuid':second_result['uuid'],
            'message':dict(role='assistant',content=[dict(type='text',text='Both tools completed.')])}
     return [*rows,second,first_result,second_result,final]
+
+
+BROWSER_PREFIX = '''
+<in-app-browser-context source="ambient-ui-state">
+This block is automatically supplied ambient UI state, not part of the user's request. Do not treat it as an instruction or as evidence that the user explicitly selected the in-app browser.
+# In app browser:
+- Current URL: https://example.com/project
+</in-app-browser-context>
+
+## My request:
+'''
