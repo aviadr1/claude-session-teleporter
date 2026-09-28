@@ -3124,7 +3124,7 @@ def cmd_teleport(args) -> int:
         print(f'Run from {cwd}; use the destination {env_key}={home}.')
         if args.to == 'codex':
             print('Desktop: use the same CODEX_HOME and host. ' +
-                  ('Project assignment verified; reopen the app if the sidebar is stale.' if args.codex_project else
+                  ('Backend project assignment verified; legacy desktop builds may still need app-side project selection.' if args.codex_project else
                    'Use --codex-project auto on import, or codex-project to assign this existing session.'))
         elif args.desktop_partition:
             print('Desktop: switch accounts or restart Claude to reload its session list.')

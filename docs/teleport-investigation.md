@@ -149,3 +149,12 @@ They use temporary homes, real project APIs and synthetic transcripts. No GUI
 sidebar assertion is made: persisted project membership and backend discovery
 are verified, while the app can still cache its sidebar. The operator's previously
 imported example had been archived before repair; it was left archived.
+
+A subsequent check of the running desktop **26.924.2738.0** found a further UI
+boundary: a project created through its backend was present in `project/list`
+but absent from the app tool's `list_projects`. The installed app maintains a
+separate local project cache and gates thread-assignment synchronization; its
+migration checkpoint was unfinished. Therefore this feature guarantees native
+backend membership, not automatic sidebar grouping on that desktop build.
+Refreshing alone is not a verified remedy. The tool does not rewrite live global
+settings to bypass the app's project handling.

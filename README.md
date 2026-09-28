@@ -115,8 +115,12 @@ Dry runs never start Codex or resolve/create projects. On apply, project lookup
 happens before transcript publication. If later registration fails, the error
 identifies the retained transcript; `codex-project` repairs placement without
 replacing it. Existing assignments are preserved; archived sessions are refused.
-The sidebar may still need an app reload to show backend changes. Project
-membership is destination-local: foreign project IDs and project settings are
+**Desktop limitation:** persisted backend membership is verified. Some desktop
+builds still keep a separate local project registry and gate synchronization of
+thread assignments. On those builds, a new backend project may remain absent
+from the sidebar even after refreshing; add/select the matching project in the
+app. This command does not rewrite the live app's global settings or claim
+verified sidebar placement. Project membership is destination-local: foreign project IDs and project settings are
 not copied, and round trips resolve the destination folder again.
 
 **What transfers:** active user/assistant text and completed native tool calls
