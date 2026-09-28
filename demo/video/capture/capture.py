@@ -1,15 +1,17 @@
 """
 Capture the real terminal output the promo video shows.
 
-Builds a fresh fake Claude Code store with make_fixture.py under a scratch
-directory, points every location the tool reads (home, APPDATA, the session
+Builds a fresh fake Claude Code store with docs/demo_fixture.py (the same
+demo store behind docs/demo.gif) under a scratch directory, points every location the tool reads (home, APPDATA, the session
 store override) at that directory, checks the tool agrees before it runs a
 single command, then runs the README demo flow and writes each command's exact
 stdout+stderr to ../src/captures/.
 
-It never touches a real store: the scratch path must contain "cst-scratch"
-(make_fixture.py asserts the same), and the resolved paths are checked against
-it before anything runs.
+It never touches a real store: the scratch path must contain "cst-scratch",
+the fixture refuses any directory that isn't new or empty, and the resolved
+paths are checked against it before anything runs. The scratch path itself is
+replaced with <demo-home> in the captures, so they don't embed a machine's
+home directory; the video never shows those lines.
 
     python demo/video/capture/capture.py [SCRATCH_DIR]
 
@@ -30,11 +32,8 @@ REPO = HERE.parents[2]
 TOOL = REPO / "claude_sessions.py"
 OUT = HERE.parent / "src" / "captures"
 
-# (file stem, argv) - the README's "What it looks like" flow, in order. The
-# fixture's work org has no name in .claude.json (only the signed-in org does),
-# so it is labelled first, exactly as the `partitions` tip suggests.
+# (file stem, argv) - the README's "What it looks like" flow, in order.
 STEPS: list[tuple[str, list[str]]] = [
-    ("00-label", ["label", "3c426532", "work"]),
     ("01-partitions", ["partitions"]),
     ("02-copy-dry-run", ["copy", "--from", "work"]),
     ("03-copy-apply", ["copy", "--from", "work", "--apply"]),
@@ -74,6 +73,14 @@ def check_paths(env: dict[str, str], home: Path) -> None:
     print("paths ok: every location the tool uses is under", home)
 
 
+def normalize(text: str, home: Path) -> str:
+    """Unix newlines, and the scratch path shown as <demo-home>."""
+    text = text.replace("\r\n", "\n")
+    for form in {str(home), home.as_posix()}:
+        text = text.replace(form, "<demo-home>")
+    return text
+
+
 def main() -> int:
     home = Path(sys.argv[1] if len(sys.argv) > 1 else Path.home() / "cst-scratch" / "video-capture")
     home = home.resolve()
@@ -82,7 +89,7 @@ def main() -> int:
         shutil.rmtree(home)
     home.mkdir(parents=True)
 
-    subprocess.run([sys.executable, str(HERE / "make_fixture.py"), str(home)], check=True)
+    subprocess.run([sys.executable, str(REPO / "docs" / "demo_fixture.py"), str(home)], check=True)
     env = scratch_env(home)
     check_paths(env, home)
 
@@ -99,7 +106,7 @@ def main() -> int:
             encoding="utf-8",
         )
         assert proc.returncode == 0, f"{argv} exited {proc.returncode}:\n{proc.stdout}"
-        text = proc.stdout.replace("\r\n", "\n")
+        text = normalize(proc.stdout, home)
         (OUT / f"{stem}.txt").write_text(text, encoding="utf-8", newline="\n")
         transcript.append(f"$ claude-sessions {' '.join(argv)}\n{text}")
         print(f"captured {stem}.txt ({len(text.splitlines())} lines)")

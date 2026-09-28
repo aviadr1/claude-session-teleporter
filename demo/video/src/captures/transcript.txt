@@ -1,8 +1,6 @@
-$ claude-sessions label 3c426532 work
-✓ 3c426532-1eaa-4e6f-93c1-4d30abca7b89 labelled 'work'  (C:\Users\aviad\cst-scratch\video-capture\.claude\partition-labels.json)
 $ claude-sessions partitions
-session store: C:\Users\aviad\cst-scratch\video-capture\AppData\Roaming\Claude\claude-code-sessions
-transcripts:   C:\Users\aviad\cst-scratch\video-capture\.claude\projects
+session store: <demo-home>\AppData\Roaming\Claude\claude-code-sessions
+transcripts:   <demo-home>\.claude\projects
 
 PARTITION   ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
 ──────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ───────────────────────
@@ -83,8 +81,8 @@ Copied 2 session(s) into personal (762f7f2a-1cab-4c8a-98d1-d53bf5e8872c).
 The app caches its session list in memory. Switch accounts in the app to
 force a reload - faster than restarting it, and it works just as well.
 $ claude-sessions partitions
-session store: C:\Users\aviad\cst-scratch\video-capture\AppData\Roaming\Claude\claude-code-sessions
-transcripts:   C:\Users\aviad\cst-scratch\video-capture\.claude\projects
+session store: <demo-home>\AppData\Roaming\Claude\claude-code-sessions
+transcripts:   <demo-home>\.claude\projects
 
 PARTITION   ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
 ──────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ───────────────────────

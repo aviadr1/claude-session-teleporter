@@ -12,17 +12,18 @@ allowlists in `pyproject.toml`, so nothing here is shipped.
 
 The video never types out tool output by hand. `capture/capture.py`:
 
-1. builds a fresh fake Claude Code store with `capture/make_fixture.py` under a
-   scratch directory. The path must contain `cst-scratch`, and both scripts
-   refuse to run otherwise.
+1. builds a fresh fake Claude Code store with `docs/demo_fixture.py`, the same
+   demo store behind `docs/demo.gif`, under a scratch directory. The path must
+   contain `cst-scratch`, and the fixture refuses any directory that isn't new
+   or empty.
 2. points `HOME`, `USERPROFILE`, `APPDATA` and `CLAUDE_SESSIONS_ROOT` at that
    directory, then asks the tool where it will read and write. It stops unless
    every path is inside the scratch directory, so it cannot reach a real
    `~/.claude` or `%APPDATA%\Claude`.
-3. runs the README's demo flow (`label`, `partitions`, `copy --from work`,
+3. runs the README's demo flow (`partitions`, `copy --from work`,
    `copy --from work --apply`, `partitions`, `sessions -p personal`) with the
    repo's `claude_sessions.py`, and writes each command's exact stdout and
-   stderr to `src/captures/`.
+   stderr to `src/captures/`, with the scratch path shown as `<demo-home>`.
 
 `src/captures.ts` imports those files verbatim. Each scene picks lines out of
 them by content, for example "the line containing `═══▶`". If a lookup finds

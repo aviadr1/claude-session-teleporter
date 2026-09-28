@@ -1,5 +1,5 @@
 // How long ago each fixture session was last active, as the stylised app
-// shows it. These match make_fixture.py (age_h = 1, 3 and 5 hours); the
+// shows it. These match docs/demo_fixture.py (age_h = 1, 3 and 5 hours); the
 // titles themselves come from the captures.
 import {personalTitleBefore, workTitles} from './captures';
 

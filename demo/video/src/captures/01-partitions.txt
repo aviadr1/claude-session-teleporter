@@ -1,5 +1,5 @@
-session store: C:\Users\aviad\cst-scratch\video-capture\AppData\Roaming\Claude\claude-code-sessions
-transcripts:   C:\Users\aviad\cst-scratch\video-capture\.claude\projects
+session store: <demo-home>\AppData\Roaming\Claude\claude-code-sessions
+transcripts:   <demo-home>\.claude\projects
 
 PARTITION   ORG UUID                              ACCOUNT   ALL  UNARCH  DEL  LAST ACTIVITY     QUOTA LEFT        CONNECTORS
 ──────────  ────────────────────────────────────  ────────  ───  ──────  ───  ────────────────  ────────────────  ───────────────────────

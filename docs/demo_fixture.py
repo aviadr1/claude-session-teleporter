@@ -1,12 +1,24 @@
-"""Build a fake Claude Code store under a scratch home. Never touches the real one."""
+"""Build the demo store behind docs/demo.gif and the README's example output.
+
+One login with two orgs: `work` (3 sessions, 2% quota left, a Datadog connector
+the other org lacks) and `personal` (signed in, 1 session). It writes a fake
+Claude Code store under HOME_DIR and never touches a real one.
+
+    python docs/demo_fixture.py HOME_DIR
+    HOME=HOME_DIR APPDATA=HOME_DIR/AppData/Roaming claude-sessions partitions
+
+docs/demo.tape records the GIF against it; tests/test_demo.py replays the
+same commands so the GIF cannot drift from what the tool prints.
+"""
+
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
-home = Path(sys.argv[1])
-assert "cst-scratch" in str(home), home
+home = Path(sys.argv[1]).resolve()
+if home == Path.home().resolve() or (home.exists() and any(home.iterdir())):
+    sys.exit(f"refusing to write a demo store into {home}: use a new, empty directory")
 appdata = home / "AppData" / "Roaming"
 store = appdata / "Claude" / "claude-code-sessions"
 projects = home / ".claude" / "projects"
@@ -78,4 +90,6 @@ session(PERSONAL, "b16b00b5-4444-4444-8444-000000000004", "a1b2c3d4-0000-4000-80
     {"org": WORK, "t": now - HOUR, "u": {"fh": 98, "sd": 71}},
     {"org": PERSONAL, "t": now - 2 * HOUR, "u": {"fh": 4, "sd": 12}},
 ]}), encoding="utf-8")
+# The name `work` comes from `claude-sessions label 3c42 work`; `personal` from the login.
+(home / ".claude" / "partition-labels.json").write_text(json.dumps({WORK: "work"}), encoding="utf-8")
 print("fixture at", home)

@@ -19,6 +19,10 @@ at all. Either way, every session is still on your disk. This tool finds them
 and puts them back in the app, so you can pick up where you left off, even when
 the org you were using has run out of quota.
 
+![claude-sessions partitions finds a second org with 2% quota left, copy --from work plans the move and remaps its connectors, and --apply brings both sessions into the signed-in org](https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/docs/demo.gif)
+
+<sub>Real output against a demo store built by [`docs/demo_fixture.py`](https://github.com/aviadr1/claude-session-teleporter/blob/main/docs/demo_fixture.py), not your sessions. Re-record with `vhs docs/demo.tape`.</sub>
+
 ## Quick start
 
 With [uv](https://docs.astral.sh/uv/):

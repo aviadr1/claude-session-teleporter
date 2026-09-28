@@ -47,7 +47,7 @@ only-include = ["claude_sessions.py"]
 [tool.hatch.build.targets.sdist]
 # anchored with a leading "/": unanchored names match at any depth, and
 # demo/video/README.md must not ride along
-include = ["/claude_sessions.py", "/README.md", "/INVARIANTS.md", "/LICENSE", "/tests"]
+include = ["/claude_sessions.py", "/README.md", "/INVARIANTS.md", "/LICENSE", "/tests", "/docs/demo_fixture.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
