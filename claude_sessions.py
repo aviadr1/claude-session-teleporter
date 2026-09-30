@@ -3416,14 +3416,24 @@ def ui_cli_summary(host: Host, path: Path) -> CliSession | None:
     return session
 
 
+def ui_path_key(path: Path) -> str:
+    """Compare ordinary and extended-length Windows paths as one file."""
+    value = str(path.resolve())
+    if value.startswith('\\\\?\\UNC\\'):
+        value = '\\\\' + value[8:]
+    elif value.startswith('\\\\?\\'):
+        value = value[4:]
+    return os.path.normcase(os.path.normpath(value))
+
+
 def ui_catalog() -> dict:
     """Discover resumable sessions from local clients and Claude partitions."""
     rows: list[dict] = []
     parts = load_partitions() if sessions_root().exists() else []
-    used_transcripts: set[Path] = set()
+    used_transcripts: set[str] = set()
     adopted_ids = {(s.wsl_distro, s.cli_session_id) for p in parts for s in p.sessions if s.is_wsl}
     for p in parts:
-        used_transcripts.update(s.transcript.resolve() for s in p.sessions if s.transcript)
+        used_transcripts.update(ui_path_key(s.transcript) for s in p.sessions if s.transcript)
         for s in p.unarchived:
             rows.append({'id': f'p:{p.key}:{s.uuid}', 'kind': 'partition', 'title': s.title,
                          'project': re.split(r'[\\/]', s.cwd.rstrip('\\/'))[-1] or s.cwd,
@@ -3431,7 +3441,7 @@ def ui_catalog() -> dict:
                          'distro': s.wsl_distro, 'cwd': s.cwd,
                          'missing': not bool(s.transcript), 'modified': s.last_activity})
     for path in agent_transcripts('claude', native_path(agent_home('claude'))):
-        if path.resolve() in used_transcripts:
+        if ui_path_key(path) in used_transcripts:
             continue
         c = ui_cli_summary(WINDOWS_HOST, path)
         if c is None:

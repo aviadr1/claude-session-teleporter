@@ -189,14 +189,15 @@ def test_ui_claude_to_codex_preview_is_read_only(two_orgs):
     data = json.loads(metadata.read_text())
     data['cwd'] = data['originCwd'] = str(cwd)
     metadata.write_text(json.dumps(data))
-    write_rows(world.projects / cs.encode_cwd(str(cwd)) / 'cli-a-1.jsonl',
+    write_rows(world.projects / cs.encode_cwd(str(cwd)) / 'ui-unique.jsonl',
                claude_rows(cwd))
     before = world.snapshot(world.a, world.projects)
     browser = Browser()
     try:
         status, catalog = browser.request('/api/catalog', {})
         assert status == 200
-        source = next(r for r in catalog['sessions'] if r.get('partition') == world.ACCOUNT + '/' + world.ORG_A)
+        source = next(r for r in catalog['sessions'] if r['kind'] == 'claude-cli'
+                      and r['id'].endswith('ui-unique.jsonl'))
         status, preview = browser.request('/api/preview', {'sessions': [source['id']], 'to': 'codex'})
         assert status == 200, preview
         assert 'Codex' in preview['destination']
