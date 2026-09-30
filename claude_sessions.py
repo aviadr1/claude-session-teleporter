@@ -46,6 +46,7 @@ Commands:
   adopt        surface WSL CLI sessions in the desktop app (dry-run by default)
   eject        put a desktop session's transcript where the WSL CLI finds it
   teleport     fork conversation history between Claude and Codex
+  ui           select and transfer several local sessions in a browser
   codex-project assign an imported Codex session to a desktop project
   label        give a partition a human-readable name
   guide        print a start-to-finish walkthrough
@@ -95,7 +96,17 @@ def sessions_root() -> Path:
         return Path(override)
     appdata = os.environ.get("APPDATA")
     if appdata:  # Windows
-        return Path(appdata) / "Claude" / "claude-code-sessions"
+        classic = Path(appdata) / "Claude" / "claude-code-sessions"
+        if classic.exists():
+            return classic
+        # Microsoft Store installs redirect Roaming AppData inside the package.
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            packages = Path(local_appdata) / "Packages"
+            stores = list(packages.glob("Claude_*/LocalCache/Roaming/Claude/claude-code-sessions"))
+            if stores:
+                return max(stores, key=lambda p: p.stat().st_mtime)
+        return classic
     mac = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
     if mac.exists():
         return mac
@@ -2270,6 +2281,18 @@ def native_path(path: Path) -> Path:
     return Path('\\\\?\\UNC\\' + value[2:] if value.startswith('\\\\') else '\\\\?\\' + value)
 
 
+def agent_transcripts(agent: str, home: Path, archived: bool = False) -> list[Path]:
+    if agent == 'claude':
+        files = list((home / 'projects').glob('*/*.jsonl'))
+    elif agent == 'codex':
+        files = list((home / 'sessions').rglob('*.jsonl'))
+        if archived:
+            files += list((home / 'archived_sessions').rglob('*.jsonl'))
+    else:
+        raise ValueError(f'unsupported client: {agent}')
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
 def cmd_agent_sessions(args) -> int:
     if args.partition or args.host or args.cli or args.desktop:
         die('--agent cannot be combined with partition/host/origin filters; use --home')
@@ -2277,13 +2300,7 @@ def cmd_agent_sessions(args) -> int:
         die('--limit must be positive')
     home = native_path(Path(args.home).expanduser() if args.home else agent_home(args.agent))
     try:
-        if args.agent == 'claude':
-            files = list((home / 'projects').glob('*/*.jsonl'))
-        else:
-            files = list((home / 'sessions').rglob('*.jsonl'))
-            if args.all:
-                files += list((home / 'archived_sessions').rglob('*.jsonl'))
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        files = agent_transcripts(args.agent, home, args.all)
         for path in files[:args.limit or 20]:
             try:
                 session = read_portable_session(path)
@@ -3231,6 +3248,583 @@ def cmd_teleport(args) -> int:
         die(str(exc))
 
 
+# ---------------------------------------------------------------------------
+# Local browser UI. Assets are embedded to keep the single-file install story.
+# ---------------------------------------------------------------------------
+
+UI_HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session teleporter</title>
+<style nonce="__NONCE__">
+:root{color-scheme:dark;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;background:#090909;color:#eeeee8}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:clamp(18px,5vw,60px)}button,input,select{font:inherit}button{cursor:pointer}button:disabled{cursor:default}[hidden]{display:none!important}
+.app{width:min(860px,100%);border:1px solid #30302d;background:#090909;box-shadow:0 22px 70px #0008}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:25px 28px 22px}h1,h2{font-family:ui-monospace,Consolas,monospace;font-weight:400;letter-spacing:-1.5px}h1{font-size:29px;line-height:1.1;margin:0}h2{font-size:25px;margin:0 0 15px}.local{color:#a4a49b;font-size:11px;white-space:nowrap}.local:before{content:"";display:inline-block;width:6px;height:6px;background:#bad097;margin-right:8px;vertical-align:1px}
+.search{display:flex;align-items:center;gap:10px;margin:0 28px 21px;padding:10px 12px;border:1px solid #383832;color:#aaa99f}.search input{width:100%;background:transparent;border:0;outline:0;color:#eeeee8;font-size:12px}.search:focus-within{border-color:#aaa99f}input::placeholder{color:#929289}
+.columnhead{padding:10px 28px;border-bottom:1px solid #34342e;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#aaa99f}.all{display:flex;align-items:center;gap:13px;cursor:pointer}.filter-wrap{position:relative}.filter-button{border:0;background:transparent;color:#aaa99f;padding:3px 0 3px 8px;font-size:11px}.filter-button:hover,.filter-button[aria-expanded=true]{color:#eeeee8}.filter-menu{position:absolute;top:calc(100% + 9px);right:0;z-index:3;min-width:190px;max-width:min(300px,80vw);max-height:260px;overflow:auto;padding:7px;background:#161613;border:1px solid #606057;box-shadow:0 14px 30px #000a}.filter-option{display:flex;align-items:center;gap:10px;padding:8px;color:#deded4;white-space:nowrap;cursor:pointer}.filter-option:hover{background:#292923}.filter-separator{height:1px;background:#3e3e36;margin:4px 0}input[type=checkbox]{width:15px;height:15px;accent-color:#eeeee8;margin:0;flex-shrink:0;cursor:pointer}
+.list{max-height:min(56vh,560px);min-height:145px;overflow:auto}.row{display:grid;grid-template-columns:15px minmax(0,1fr) 140px;align-items:center;gap:13px;padding:15px 28px;border-bottom:1px solid #262623;min-height:69px;cursor:pointer}.row:has(input:checked){background:#eeeee8;color:#11110e}.row:has(input:checked) input{accent-color:#161612;color-scheme:light}.row:has(input:disabled){opacity:.45}.row-main{display:block;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}.row-main:hover .title{text-decoration:underline;text-underline-offset:3px}.title{display:block;font-size:13px;font-weight:600;overflow-wrap:anywhere}.project{display:block;color:#9e9e94;font-size:11px;margin-top:4px}.agent{font-size:11px;text-align:right;color:#afafa4}.row:has(input:checked) .project,.row:has(input:checked) .agent{color:#59594f}.empty{padding:36px 20px;text-align:center;color:#aaa99f}
+.actions{display:flex;gap:14px;align-items:center;padding:22px 28px;background:#0d0d0b;border-top:1px solid #42423b;flex-wrap:wrap}.count{color:#afafa4;font-size:12px;margin-right:auto}.to{display:flex;align-items:center;gap:10px;color:#afafa4;font-size:12px}select{background:#11110e;border:1px solid #57574d;color:#eeeee8;padding:10px 30px 10px 11px;min-width:155px;font-size:12px}.primary{background:#eeeee8;color:#11110e;border:1px solid #eeeee8;padding:11px 16px;font-size:12px;font-weight:600;min-width:150px}.primary:hover:not(:disabled){background:white}.primary:disabled{opacity:.4}.secondary{background:transparent;color:#ccccc0;border:1px solid #55554b;padding:10px 16px;font-size:12px}.secondary:hover{border-color:#ccc}.status{margin:0;padding:14px 28px;color:#e0e0d4;background:#181813;border-top:1px solid #44443b;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.status.error{color:#ffb6a8}.status details,.dialog details{margin-top:10px}.status pre,.dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#aaa99f;max-height:200px;overflow:auto;font:11px/1.5 inherit}
+.backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:#000c;z-index:2}.dialog{width:450px;max-width:100%;max-height:90vh;overflow:auto;padding:26px;background:#11110f;border:1px solid #66665a;box-shadow:0 20px 70px #0008}.dialog p{color:#b4b4a6;margin:0 0 18px;line-height:1.7;font-size:12px}.dialog ul{padding:0;list-style:none;margin:0 0 20px;font-size:12px}.dialog li{padding:6px 0;overflow-wrap:anywhere}.dialog li small{display:block;color:#99998d}.dialog-actions{display:flex;justify-content:end;gap:10px;flex-wrap:wrap}.note{color:#a4a49b;font-size:11px;margin-top:14px}
+.peek-dialog{width:650px}.peek-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.peek-meta{font-size:11px;color:#a4a49b;overflow-wrap:anywhere}.peek-scroll{max-height:58vh;overflow:auto;margin:17px 0}.peek-turn{padding:13px 0;border-top:1px solid #35352f}.peek-role{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#a4a49b;margin-bottom:7px}.peek-text{font-size:12px;color:#e3e3d9;white-space:pre-wrap;overflow-wrap:anywhere;margin:0!important;line-height:1.6}.peek-gap{font-size:11px;color:#929289;padding:12px 0}.peek-note{font-size:11px;color:#a4a49b;margin:0 0 15px}
+@media(max-width:600px){body{padding:0}.app{border-left:0;border-right:0;min-height:100vh}header{padding:22px 18px}h1{font-size:25px}.search{margin:0 18px 17px}.columnhead{padding:10px 18px}.row{padding:15px 18px;grid-template-columns:15px minmax(0,1fr);gap:10px}.agent{grid-column:2;text-align:left;margin-top:-5px}.actions{padding:18px;gap:12px}.count{width:100%;margin-right:0}.to{flex:1}select{min-width:0;max-width:210px;flex:1}.actions>.primary{width:100%}.dialog{padding:20px}}
+</style>
+</head>
+<body>
+<main class="app">
+<header><h1>Session teleporter</h1><span class="local">On this computer</span></header>
+<label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="Search sessions" placeholder="Search sessions…"></label>
+<div class="columnhead"><label class="all"><input id="all" type="checkbox"><span>Select shown (up to 25)</span></label><div class="filter-wrap"><button type="button" id="agent-filter" class="filter-button" aria-expanded="false" aria-controls="agent-menu">All agents ▾</button><div id="agent-menu" class="filter-menu" hidden><label class="filter-option"><input id="agent-all" type="checkbox" checked>All</label><div class="filter-separator"></div><div id="agent-options"></div></div></div></div>
+<div id="list" class="list" aria-label="Discovered sessions"><p class="empty">Finding sessions…</p></div>
+<footer class="actions"><span id="count" class="count" aria-live="polite">0 selected</span><label class="to">To <select id="target" aria-label="Destination agent"></select></label><button type="button" id="transfer" class="primary" disabled>Transfer sessions →</button></footer>
+<div id="status" class="status" role="status" aria-live="polite" hidden></div>
+</main>
+<div id="modal" class="backdrop" hidden><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><h2 id="confirm-title"></h2><ul id="confirm-list"></ul><p id="confirm-note">Original sessions stay intact. Existing sessions are never overwritten.</p><details><summary>Transfer details</summary><pre id="details"></pre></details><div class="dialog-actions"><button type="button" id="cancel" class="secondary">Cancel</button><button type="button" id="confirm" class="primary">Transfer</button></div><div class="note">Local transfer · no upload</div></section></div>
+<div id="peek-modal" class="backdrop" hidden><section class="dialog peek-dialog" role="dialog" aria-modal="true" aria-labelledby="peek-title"><div class="peek-heading"><h2 id="peek-title">Session preview</h2><button type="button" id="peek-close" class="secondary">Close</button></div><div id="peek-meta" class="peek-meta"></div><div id="peek-messages" class="peek-scroll" aria-live="polite">Loading session…</div><div id="peek-note" class="peek-note">Read-only preview · your selection is preserved</div></section></div>
+<script nonce="__NONCE__">
+(() => {
+  const $=id=>document.getElementById(id);
+  const token=location.hash.slice(1);
+  let catalog={sessions:[],destinations:[]}, selected=new Set(), sources=null, preview=null, busy=false, peekOpener=null, peekGeneration=0;
+  const sourceNames=()=>[...new Set(catalog.sessions.map(r=>r.source))].sort((a,b)=>a.localeCompare(b));
+  const rows=()=>catalog.sessions.filter(r=>(sources===null||sources.has(r.source))&&(r.title+' '+r.project+' '+r.source).toLowerCase().includes($('search').value.toLowerCase()));
+  const target=()=>$('target').value;
+  const eligible=r=>!r.missing && !(target()==='codex' && r.kind==='codex') && !(target().startsWith('claude:') && (r.kind==='claude-cli'||r.partition===target().slice(7)));
+  const name=()=>catalog.destinations.find(d=>d.id===target())?.name||target();
+  function activity(value){
+    const date=new Date(Number(value));
+    if(!Number.isFinite(Number(value))||Number(value)<=0||!Number.isFinite(date.getTime()))return {label:'Last active unknown',exact:''};
+    const options={month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'};
+    if(date.getFullYear()!==new Date().getFullYear())options.year='numeric';
+    return {label:'Last active '+new Intl.DateTimeFormat(undefined,options).format(date),exact:date.toLocaleString()};
+  }
+  function renderSources(){
+    const names=sourceNames(),options=$('agent-options');options.replaceChildren();
+    $('agent-all').checked=sources===null;
+    $('agent-filter').textContent=sources===null?'All agents ▾':sources.size===1?[...sources][0]+' ▾':sources.size+' agents ▾';
+    for(const name of names){const label=document.createElement('label'),check=document.createElement('input');label.className='filter-option';check.type='checkbox';check.checked=sources!==null&&sources.has(name);check.addEventListener('change',()=>{if(sources===null)sources=new Set();if(check.checked)sources.add(name);else sources.delete(name);if(!sources.size)sources=null;renderSources();render()});label.append(check,document.createTextNode(name));options.append(label)}
+  }
+  function closePeek(){peekGeneration++;$('peek-modal').hidden=true;document.querySelector('.app').inert=false;peekOpener?.focus()}
+  async function openPeek(row,opener){
+    peekOpener=opener;const generation=++peekGeneration;$('peek-title').textContent=row.title||'Untitled session';$('peek-meta').textContent=row.source+' · '+(row.project||'Unknown project')+' · '+activity(row.modified).label;$('peek-messages').textContent='Loading session…';$('peek-note').textContent='Read-only preview · your selection is preserved';$('peek-modal').hidden=false;document.querySelector('.app').inert=true;$('peek-close').focus();
+    try{const data=await api('peek',{session:row.id});if(generation!==peekGeneration)return;$('peek-title').textContent=data.title||'Untitled session';$('peek-meta').textContent=data.source+' · '+(data.cwd||data.project)+' · '+activity(data.modified).label;const area=$('peek-messages');area.replaceChildren();if(!data.messages.length){area.textContent='No text messages found in this transcript.'}else{const beforeGap=Math.min(2,data.messages.length);for(let i=0;i<data.messages.length;i++){if(i===beforeGap&&data.omitted){const gap=document.createElement('div');gap.className='peek-gap';gap.textContent='… '+data.omitted+' earlier messages omitted …';area.append(gap)}const message=data.messages[i],turn=document.createElement('article'),role=document.createElement('span'),body=document.createElement('p');turn.className='peek-turn';role.className='peek-role';role.textContent=message.role;body.className='peek-text';body.textContent=message.text;turn.append(role,body);area.append(turn)}}if(data.approximate)$('peek-note').textContent='Read-only text preview of an in-progress session · your selection is preserved'}
+    catch(err){if(generation===peekGeneration)$('peek-messages').textContent=err.message}
+  }
+  async function api(path,body){
+    const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Teleporter-Token':token},body:JSON.stringify(body)});
+    const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data;
+  }
+  function status(message,error=false,details=''){
+    const el=$('status');el.replaceChildren();el.classList.toggle('error',error);el.append(document.createTextNode(message));
+    if(details){const box=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='Transfer output';pre.textContent=details;box.append(summary,pre);el.append(box)}el.hidden=false;
+  }
+  function update(){
+    const n=selected.size;$('count').textContent=n+' selected';$('transfer').textContent='Transfer '+(n?n+' ':'')+'session'+(n===1?'':'s')+' →';$('transfer').disabled=!n||busy;
+    const match=rows().filter(eligible);$('all').checked=!!match.length&&match.every(r=>selected.has(r.id));$('all').indeterminate=match.some(r=>selected.has(r.id))&&!$('all').checked;$('all').disabled=!match.length||busy;
+  }
+  function render(){
+    const list=$('list');list.replaceChildren();const found=rows();
+    if(!found.length){const empty=document.createElement('p');empty.className='empty';empty.textContent=catalog.sessions.length?'No matching sessions.':'No sessions found on this computer.';list.append(empty)}
+    for(const row of found){const line=document.createElement('div');line.className='row';const check=document.createElement('input');check.type='checkbox';check.checked=selected.has(row.id);check.disabled=!eligible(row)||busy;check.setAttribute('aria-label','Select '+row.title);check.addEventListener('click',e=>e.stopPropagation());check.addEventListener('change',()=>{if(check.checked){if(selected.size>=25){check.checked=false;status('Choose up to 25 sessions.',true)}else selected.add(row.id)}else selected.delete(row.id);update()});
+      const body=document.createElement('button'),title=document.createElement('span'),project=document.createElement('span'),agent=document.createElement('span');body.type='button';body.className='row-main';body.setAttribute('aria-label','Preview '+row.title);title.className='title';title.textContent=row.title||'Untitled session';project.className='project';const when=activity(row.modified);project.textContent=(row.project||'Unknown project')+' · '+when.label+(row.missing?' · transcript missing':'');if(when.exact)project.title=when.exact;agent.className='agent';agent.textContent=row.source;body.append(title,project);line.append(check,body,agent);line.addEventListener('click',()=>openPeek(row,body));list.append(line)}update();
+  }
+  async function load(){
+    try{catalog=await api('catalog',{});const old=target();$('target').replaceChildren();for(const dest of catalog.destinations){const option=document.createElement('option');option.value=dest.id;option.textContent=dest.name;$('target').append(option)}if(catalog.destinations.some(d=>d.id===old))$('target').value=old;if(sources!==null){sources=new Set([...sources].filter(name=>sourceNames().includes(name)));if(!sources.size)sources=null}selected=new Set([...selected].filter(id=>catalog.sessions.some(r=>r.id===id&&eligible(r))));renderSources();render()}
+    catch(err){$('list').replaceChildren();status(err.message,true)}
+  }
+  function close(){preview=null;$('modal').hidden=true;document.querySelector('.app').inert=false;$('transfer').focus()}
+  $('search').addEventListener('input',render);
+  $('peek-close').addEventListener('click',closePeek);
+  $('agent-filter').addEventListener('click',()=>{const open=$('agent-menu').hidden;$('agent-menu').hidden=!open;$('agent-filter').setAttribute('aria-expanded',String(open))});
+  $('agent-all').addEventListener('change',()=>{sources=null;renderSources();render()});
+  document.addEventListener('click',e=>{if(!$('agent-menu').hidden&&!e.target.closest('.filter-wrap')){$('agent-menu').hidden=true;$('agent-filter').setAttribute('aria-expanded','false')}});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('agent-menu').hidden){$('agent-menu').hidden=true;$('agent-filter').setAttribute('aria-expanded','false');$('agent-filter').focus()}});
+  $('target').addEventListener('change',()=>{selected=new Set([...selected].filter(id=>catalog.sessions.some(r=>r.id===id&&eligible(r))));$('status').hidden=true;render()});
+  $('all').addEventListener('change',e=>{for(const row of rows().filter(eligible)){if(e.target.checked&&selected.size<25)selected.add(row.id);else if(!e.target.checked)selected.delete(row.id)}render()});
+  $('transfer').addEventListener('click',async()=>{
+    busy=true;update();$('status').hidden=true;
+    try{preview=await api('preview',{sessions:[...selected],to:target()});$('confirm-title').textContent='Transfer '+selected.size+' session'+(selected.size===1?'':'s')+' to '+preview.destination+'?';$('confirm-list').replaceChildren();for(const item of preview.sessions){const li=document.createElement('li'),small=document.createElement('small');li.textContent=item.title;small.textContent=item.source;li.append(small);$('confirm-list').append(li)}$('confirm-note').textContent='Original sessions stay intact. Existing sessions are never overwritten.'+(preview.cross_account?' This crosses Claude accounts.':'');$('details').textContent=preview.details;$('modal').hidden=false;document.querySelector('.app').inert=true;$('cancel').focus()}
+    catch(err){status(err.message,true)}finally{busy=false;update()}
+  });
+  $('cancel').addEventListener('click',close);
+  $('confirm').addEventListener('click',async()=>{
+    if(!preview)return;const key=preview.preview;$('confirm').disabled=true;$('confirm').textContent='Transferring…';
+    try{const result=await api('apply',{preview:key});close();const success=result.results.filter(r=>r.ok).length;const total=result.results.length;const output=result.results.map(r=>r.title+'\n'+r.output).join('\n\n');status(success+' of '+total+' session'+(total===1?'':'s')+' transferred to '+result.destination+'.'+(success<total?' Check transfer output.':''),success<total,output);selected.clear();await load()}
+    catch(err){close();status(err.message,true)}finally{$('confirm').disabled=false;$('confirm').textContent='Transfer'}
+  });
+  document.addEventListener('keydown',e=>{if(!$('peek-modal').hidden){if(e.key==='Escape'){e.preventDefault();closePeek()}else if(e.key==='Tab'){e.preventDefault();$('peek-close').focus()}return}if($('modal').hidden)return;if(e.key==='Escape'){e.preventDefault();close()}if(e.key==='Tab'){const first=$('cancel'),last=$('confirm');if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}});
+  load();
+})();
+</script>
+</body>
+</html>'''
+
+
+def ui_codex_summary(path: Path) -> tuple[str, str] | None:
+    """Read only the rollout head for the picker; preview validates the whole file."""
+    try:
+        with path.open(encoding='utf-8') as stream:
+            header = json.loads(stream.readline())
+            if header.get('type') != 'session_meta':
+                return None
+            cwd = header.get('payload', {}).get('cwd', '')
+            if not isinstance(cwd, str):
+                return None
+            title = ''
+            for _, line in zip(range(120), stream):
+                if '"user_message"' not in line and '"input_text"' not in line:
+                    continue
+                record = json.loads(line)
+                payload = record.get('payload', {})
+                if record.get('type') == 'event_msg' and payload.get('type') == 'user_message':
+                    title = payload.get('message', '')
+                elif (record.get('type') == 'response_item' and payload.get('type') == 'message'
+                      and payload.get('role') == 'user'):
+                    title = next((block.get('text', '') for block in payload.get('content', [])
+                                  if isinstance(block, dict) and block.get('type') == 'input_text'), '')
+                if isinstance(title, str) and title.strip():
+                    return title.strip().splitlines()[0][:70], cwd
+            return 'Codex session', cwd
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def ui_cli_summary(host: Host, path: Path) -> CliSession | None:
+    """Read location from the head and a readable title from the tail."""
+    session = read_cli_session(host, path, deep=False)
+    if session is None:
+        return None
+    try:
+        with path.open('rb') as stream:
+            stream.seek(max(0, path.stat().st_size - 262144))
+            tail = stream.read().decode('utf-8', errors='replace')
+    except OSError:
+        return session
+    title, prompt = '', ''
+    for line in tail.splitlines():
+        if '"ai-title"' in line:
+            record = _loads(line)
+            if record and record.get('type') == 'ai-title':
+                title = record.get('aiTitle') or title
+        elif '"last-prompt"' in line:
+            record = _loads(line)
+            if record and record.get('type') == 'last-prompt':
+                prompt = record.get('lastPrompt') or prompt
+    session.title = (title or prompt or session.title).strip().splitlines()[0][:70]
+    return session
+
+
+def ui_path_key(path: Path) -> str:
+    """Compare ordinary and extended-length Windows paths as one file."""
+    value = str(path.resolve())
+    if value.startswith('\\\\?\\UNC\\'):
+        value = '\\\\' + value[8:]
+    elif value.startswith('\\\\?\\'):
+        value = value[4:]
+    return os.path.normcase(os.path.normpath(value))
+
+
+def ui_catalog() -> dict:
+    """Discover resumable sessions from local clients and Claude partitions."""
+    rows: list[dict] = []
+    parts = load_partitions() if sessions_root().exists() else []
+    used_transcripts: set[str] = set()
+    adopted_ids = {(s.wsl_distro, s.cli_session_id) for p in parts for s in p.sessions if s.is_wsl}
+    for p in parts:
+        used_transcripts.update(ui_path_key(s.transcript) for s in p.sessions if s.transcript)
+        for s in p.unarchived:
+            rows.append({'id': f'p:{p.key}:{s.uuid}', 'kind': 'partition', 'title': s.title,
+                         'project': re.split(r'[\\/]', s.cwd.rstrip('\\/'))[-1] or s.cwd,
+                         'source': f'Claude · {p.name}', 'partition': p.key,
+                         'distro': s.wsl_distro, 'cwd': s.cwd,
+                         'missing': not bool(s.transcript), 'modified': s.last_activity})
+    for path in agent_transcripts('claude', native_path(agent_home('claude'))):
+        if ui_path_key(path) in used_transcripts:
+            continue
+        c = ui_cli_summary(WINDOWS_HOST, path)
+        if c is None:
+            continue
+        rows.append({'id': 'c:' + str(path), 'kind': 'claude-cli', 'title': c.title,
+                     'project': re.split(r'[\\/]', c.cwd.rstrip('\\/'))[-1] or c.cwd,
+                     'source': 'Claude · CLI', 'cwd': c.cwd,
+                     'modified': c.last_activity})
+    for path in agent_transcripts('codex', native_path(agent_home('codex')))[:100]:
+        summary = ui_codex_summary(path)
+        if summary is None:
+            continue
+        title, cwd = summary
+        rows.append({'id': 'x:' + str(path), 'kind': 'codex',
+                     'title': title,
+                     'project': re.split(r'[\\/]', cwd.rstrip('\\/'))[-1] or cwd,
+                     'source': 'Codex', 'cwd': cwd,
+                     'modified': int(path.stat().st_mtime * 1000)})
+    for host in discover_hosts():
+        if not host.is_wsl:
+            continue
+        try:
+            paths = sorted(host.projects.glob('*/*.jsonl'),
+                           key=lambda p: p.stat().st_mtime, reverse=True)[:100]
+        except OSError:
+            continue
+        for path in paths:
+            c = ui_cli_summary(host, path)
+            if c is None:
+                continue
+            if not c.born_in_cli or (host.distro, c.cli_id) in adopted_ids:
+                continue
+            rows.append({'id': f'w:{host.distro}:{c.cli_id}', 'kind': 'wsl',
+                         'title': c.title,
+                         'project': re.split(r'[\\/]', c.cwd.rstrip('\\/'))[-1] or c.cwd,
+                         'source': f'Claude · {host.distro}', 'distro': host.distro,
+                         'cwd': c.cwd, 'modified': c.last_activity})
+    rows.sort(key=lambda r: -r['modified'])
+    destinations = [{'id': 'codex', 'name': 'Codex'}]
+    destinations += [{'id': 'claude:' + p.key, 'name': 'Claude · ' + p.name,
+                      'signed_in': p.signed_in} for p in parts]
+    return {'sessions': rows, 'destinations': destinations}
+
+
+def ui_job(row: dict, target: str, parts: list[Partition]) -> tuple[list[str], Path]:
+    """Map a discovered row to an existing dry-run-first CLI command."""
+    if target != 'codex' and not target.startswith('claude:'):
+        raise ValueError('Choose a destination')
+    dst = next((p for p in parts if target == 'claude:' + p.key), None)
+    if target != 'codex' and dst is None:
+        raise ValueError('Destination organization is unavailable; refresh sessions')
+    kind, row_id = row['kind'], row['id']
+    if kind == 'partition':
+        src = next((p for p in parts if row['partition'] == p.key), None)
+        if src is None:
+            raise ValueError('Source organization changed; refresh sessions')
+        session = next((s for s in src.sessions if row_id == f'p:{src.key}:{s.uuid}'), None)
+        if session is None or session.archived or not session.transcript:
+            raise ValueError('Source transcript is unavailable; refresh sessions')
+        if dst:
+            if src.key == dst.key:
+                raise ValueError('A session is already in the selected organization')
+            if session.uuid in dst.tombstones or (dst.path / session.path.name).exists():
+                raise ValueError('A selected session already exists or was deleted in the destination')
+            argv = ['copy', '--from=' + src.key, '--to=' + dst.key,
+                    '--session=' + session.uuid]
+            if src.account != dst.account:
+                argv.append('--allow-cross-account')
+            return argv, session.transcript
+        argv = ['teleport', '--to=codex', '--codex-project=auto']
+        if session.is_wsl:
+            argv.append('--cwd=' + wsl_to_win_path(session.cwd, session.wsl_distro or ''))
+        return argv + ['--', str(session.transcript)], session.transcript
+    if kind == 'wsl':
+        _, distro, cli_id = row_id.split(':', 2)
+        host = next((h for h in discover_hosts() if h.distro == distro and h.is_wsl), None)
+        if host is None:
+            raise ValueError('WSL source is unavailable; refresh sessions')
+        session = next((c for c in scan_cli_sessions(host) if c.cli_id == cli_id and c.born_in_cli), None)
+        if session is None:
+            raise ValueError('WSL session changed; refresh sessions')
+        if dst:
+            if session.uuid in dst.tombstones or (dst.path / session.session_id).with_suffix('.json').exists():
+                raise ValueError('A selected session already exists or was deleted in the destination')
+            return ['adopt', '--from=' + host.name, '--to=' + dst.key,
+                    '--session=' + session.cli_id], session.transcript
+        return (['teleport', '--to=codex', '--codex-project=auto',
+                 '--cwd=' + wsl_to_win_path(session.cwd, distro), '--', str(session.transcript)],
+                session.transcript)
+    if kind in ('codex', 'claude-cli'):
+        if kind == 'codex' and target == 'codex':
+            raise ValueError('A selected session is already in Codex')
+        if kind == 'claude-cli' and dst:
+            raise ValueError('Local Claude CLI sessions need a different host workflow')
+        path = Path(row_id[2:])
+        expected = agent_transcripts('codex' if kind == 'codex' else 'claude',
+                                     native_path(agent_home('codex' if kind == 'codex' else 'claude')))
+        if path not in expected:
+            raise ValueError('Source transcript changed; refresh sessions')
+        if dst:
+            return (['teleport', '--to=claude', '--desktop-partition=' + dst.key,
+                     '--', str(path)], path)
+        return ['teleport', '--to=codex', '--codex-project=auto', '--', str(path)], path
+    raise ValueError('Unknown session; refresh sessions')
+
+
+def ui_batch(data: dict, catalog: dict | None = None) -> tuple[list[tuple[dict, list[str], Path]], str]:
+    if set(data) != {'sessions', 'to'} or not isinstance(data['sessions'], list) or not isinstance(data['to'], str):
+        raise ValueError('Choose sessions and a destination')
+    ids = data['sessions']
+    if not 0 < len(ids) <= 25 or any(not isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
+        raise ValueError('Select 1 to 25 distinct sessions')
+    catalog = catalog if catalog is not None else ui_catalog()
+    if data['to'] not in {d['id'] for d in catalog['destinations']}:
+        raise ValueError('Destination is unavailable; refresh sessions')
+    found = {row['id']: row for row in catalog['sessions']}
+    parts = load_partitions() if sessions_root().exists() else []
+    jobs = []
+    for row_id in ids:
+        row = found.get(row_id)
+        if row is None:
+            raise ValueError('A selected session changed; refresh sessions')
+        argv, source = ui_job(row, data['to'], parts)
+        jobs.append((row, argv, source))
+    return jobs, next(d['name'] for d in catalog['destinations'] if d['id'] == data['to'])
+
+
+def ui_peek(data: dict, catalog: dict | None = None) -> dict:
+    """Read a few turns from a discovered transcript without changing selection."""
+    if set(data) != {'session'} or not isinstance(data['session'], str):
+        raise ValueError('Choose one session to preview')
+    catalog = catalog if catalog is not None else ui_catalog()
+    row = next((r for r in catalog['sessions'] if r['id'] == data['session']), None)
+    if row is None:
+        raise ValueError('Session changed; refresh sessions')
+    parts = load_partitions() if sessions_root().exists() else []
+    if row['kind'] == 'partition':
+        part = next(p for p in parts if p.key == row['partition'])
+        session = next(s for s in part.sessions if s.uuid == row['id'].rsplit(':', 1)[1])
+        path = session.transcript
+    elif row['kind'] == 'wsl':
+        _, distro, cli_id = row['id'].split(':', 2)
+        host = next((h for h in discover_hosts() if h.is_wsl and h.distro == distro), None)
+        if host is None:
+            raise ValueError('WSL source changed; refresh sessions')
+        cli = next((s for s in scan_cli_sessions(host) if s.cli_id == cli_id), None)
+        path = cli.transcript if cli else None
+    else:
+        path = Path(row['id'][2:])
+    if path is None or not path.is_file():
+        raise ValueError('Transcript is unavailable')
+    from collections import deque
+    first: list[dict] = []
+    last: deque[dict] = deque(maxlen=6)
+    count = 0
+
+    def add(role: str, content: str) -> None:
+        nonlocal count
+        if role not in ('user', 'assistant') or not isinstance(content, str) or not content.strip():
+            return
+        item = {'role': role, 'text': content.strip()[:1200]}
+        count += 1
+        if len(first) < 2:
+            first.append(item)
+        else:
+            last.append(item)
+
+    try:
+        session = read_portable_session(path)
+        for message in session.messages:
+            add(message.role, message.text)
+        approximate = False
+    except (OSError, ValueError):
+        # In-progress sessions can have incomplete tool calls. Text is still
+        # useful for a read-only peek, even when a transfer cannot be planned.
+        approximate = True
+        with path.open(encoding='utf-8', errors='replace') as stream:
+            for line in stream:
+                record = _loads(line)
+                if not record:
+                    continue
+                payload = record.get('payload') or {}
+                if record.get('type') == 'response_item' and payload.get('type') == 'message':
+                    content = payload.get('content') or []
+                    add(payload.get('role', ''), '\n'.join(block.get('text', '') for block in content
+                                                       if isinstance(block, dict) and isinstance(block.get('text'), str)))
+                elif record.get('type') in ('user', 'assistant'):
+                    content = (record.get('message') or {}).get('content')
+                    if isinstance(content, str):
+                        add(record['type'], content)
+                    elif isinstance(content, list):
+                        add(record['type'], '\n'.join(block.get('text', '') for block in content
+                                                      if isinstance(block, dict) and isinstance(block.get('text'), str)))
+    return {'title': row['title'], 'source': row['source'], 'project': row['project'],
+            'modified': row['modified'], 'cwd': row.get('cwd', ''),
+            'messages': first + list(last), 'omitted': max(0, count - len(first) - len(last)),
+            'approximate': approximate}
+
+
+def ui_run(argv: list[str], apply: bool = False) -> dict:
+    from contextlib import redirect_stdout, redirect_stderr
+    from io import StringIO
+    output = StringIO()
+    # HTTPServer is serial, so output capture and destination writes cannot race.
+    with redirect_stdout(output), redirect_stderr(output):
+        try:
+            code = main(['--ascii', *([argv[0], '--apply', *argv[1:]] if apply else argv)])
+        except SystemExit as exc:
+            code = exc.code or 0
+        except (OSError, ValueError) as exc:
+            print(str(exc))
+            code = 1
+    return {'ok': code == 0, 'output': output.getvalue()}
+
+
+def ui_digest(jobs: list[tuple[dict, list[str], Path]]) -> str:
+    digest = hashlib.sha256()
+    for row, _, source in jobs:
+        digest.update(row['id'].encode())
+        paths = [source]
+        if row['kind'] == 'partition':
+            account, org = row['partition'].split('/', 1)
+            uuid = row['id'].rsplit(':', 1)[1]
+            paths.append(sessions_root() / account / org / f'local_{uuid}.json')
+        for path in paths:
+            digest.update(str(path).encode())
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(block)
+    return digest.hexdigest()
+
+
+def ui_preview(data: dict, catalog: dict | None = None) -> tuple[list[tuple[dict, list[str], Path]], str, str, list[str]]:
+    jobs, destination = ui_batch(data, catalog)
+    before = ui_digest(jobs)
+    outputs = []
+    for row, argv, _ in jobs:
+        result = ui_run(argv)
+        if not result['ok'] or 'already exists' in result['output'] or 'skip:' in result['output']:
+            raise ValueError(f"{row['title']}: {result['output'].strip() or 'Cannot preview transfer'}")
+        outputs.append(result['output'])
+    if before != ui_digest(jobs):
+        raise ValueError('A source changed during preview; finish the running turn and try again')
+    return jobs, destination, before, outputs
+
+
+def make_ui_server(port: int = 0):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import hmac
+    import secrets
+    token = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(24)
+    pending: dict[str, tuple] = {}
+    catalog_cache: dict = {'at': 0.0, 'value': None}
+
+    def recent_catalog() -> dict | None:
+        return catalog_cache['value'] if time.monotonic() - catalog_cache['at'] < 30 else None
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass  # Session titles, paths and auth material stay out of access logs.
+
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(30)
+
+        def reply(self, status, data, html=False):
+            body = (data if html else json.dumps(data, ensure_ascii=False)).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'text/html; charset=utf-8' if html else 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-Frame-Options', 'DENY')
+            self.send_header('Content-Security-Policy', "default-src 'none'; "
+                             f"script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
+                             "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def trusted(self):
+            host = f'127.0.0.1:{self.server.server_port}'
+            origin = self.headers.get('Origin')
+            return (self.headers.get('Host') == host
+                    and (origin is None or origin == 'http://' + host)
+                    and self.headers.get('Sec-Fetch-Site') not in ('cross-site', 'same-site'))
+
+        def do_GET(self):
+            if not self.trusted():
+                self.reply(403, {'error': 'This UI is local to this computer'})
+            elif self.path == '/':
+                self.reply(200, UI_HTML.replace('__NONCE__', nonce), html=True)
+            else:
+                self.reply(404, {'error': 'Not found'})
+
+        def do_POST(self):
+            if not self.trusted() or not hmac.compare_digest(self.headers.get('X-Teleporter-Token', ''), token):
+                self.reply(403, {'error': 'Open the complete launch URL from your terminal to connect'})
+                return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 65536 or self.headers.get_content_type() != 'application/json':
+                    raise ValueError('Expected a JSON request of at most 64 KiB')
+                data = json.loads(self.rfile.read(length))
+                if not isinstance(data, dict):
+                    raise ValueError('Expected a JSON object')
+                self.dispatch(data)
+            except (ValueError, OSError) as exc:
+                self.reply(400, {'error': str(exc)})
+            except SystemExit:
+                self.reply(400, {'error': 'Session selection changed; refresh and try again'})
+
+        def dispatch(self, data):
+            if self.path == '/api/catalog':
+                if data:
+                    raise ValueError('Catalog request takes no options')
+                catalog_cache['value'] = ui_catalog()
+                catalog_cache['at'] = time.monotonic()
+                self.reply(200, catalog_cache['value'])
+            elif self.path == '/api/peek':
+                self.reply(200, ui_peek(data, recent_catalog()))
+            elif self.path == '/api/preview':
+                jobs, destination, digest, outputs = ui_preview(data, recent_catalog())
+                now = time.monotonic()
+                for key, value in list(pending.items()):
+                    if now - value[0] > 600:
+                        del pending[key]
+                if len(pending) >= 32:
+                    del pending[next(iter(pending))]
+                key = secrets.token_urlsafe(24)
+                pending[key] = (now, data, digest, outputs)
+                self.reply(200, {'preview': key, 'destination': destination,
+                                 'sessions': [{'title': row['title'], 'source': row['source']}
+                                              for row, _, _ in jobs],
+                                 'cross_account': any('--allow-cross-account' in argv for _, argv, _ in jobs),
+                                 'details': '\n\n'.join(outputs)})
+            elif self.path == '/api/apply':
+                if set(data) != {'preview'} or not isinstance(data['preview'], str):
+                    raise ValueError('Apply requires a preview ID only')
+                plan = pending.pop(data['preview'], None)
+                if plan is None or time.monotonic() - plan[0] > 600:
+                    raise ValueError('Preview expired or already used; select sessions again')
+                _, request, digest, outputs = plan
+                jobs, destination, current_digest, current_outputs = ui_preview(request)
+                if digest != current_digest or outputs != current_outputs:
+                    raise ValueError('Transfer changed since confirmation; select sessions again')
+                results = []
+                for row, argv, _ in jobs:
+                    result = ui_run(argv, apply=True)
+                    succeeded = result['ok'] and not any(marker in result['output'] for marker in
+                                                           ('already exists', 'Nothing to do.', 'appeared in destination',
+                                                            'Copied 0 session', 'Adopted 0 session'))
+                    results.append({'title': row['title'], 'ok': succeeded, 'output': result['output']})
+                self.reply(200, {'destination': destination, 'results': results,
+                                 'ok': all(r['ok'] for r in results)})
+            else:
+                self.reply(404, {'error': 'Not found'})
+
+    server = HTTPServer(('127.0.0.1', port), Handler)
+    server.launch_url = f'http://127.0.0.1:{server.server_port}/#{token}'
+    return server
+
+
+def cmd_ui(args) -> int:
+    import webbrowser
+    try:
+        with make_ui_server(args.port) as server:
+            print(f'Claude Session Teleporter\nOpen this local URL: {server.launch_url}', flush=True)
+            print('Keep this terminal open. Press Ctrl+C to stop. No session data is uploaded.', flush=True)
+            if not args.no_browser:
+                try:
+                    webbrowser.open(server.launch_url)
+                except webbrowser.Error:
+                    pass
+            server.serve_forever()
+    except KeyboardInterrupt:
+        print('\nUI stopped.')
+    except OSError as exc:
+        die(f'Cannot start browser UI: {exc}')
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     fmt = argparse.RawDescriptionHelpFormatter
     ap = argparse.ArgumentParser(
@@ -3242,6 +3836,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ascii", action="store_true", help="force plain ASCII output")
     ap.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     sub = ap.add_subparsers(dest="cmd", metavar="COMMAND", required=True)
+
+    ui = sub.add_parser('ui', help='open a local browser UI (no extra dependencies)')
+    ui.add_argument('--port', type=int, choices=range(0, 65536), metavar='PORT', default=0,
+                    help='loopback port (default: choose a free port)')
+    ui.add_argument('--no-browser', action='store_true', help='print the URL without opening a browser')
+    ui.set_defaults(fn=cmd_ui)
 
     pp = sub.add_parser(
         "partitions",

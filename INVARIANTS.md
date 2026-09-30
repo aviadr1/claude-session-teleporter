@@ -119,6 +119,32 @@ Partition, host and session selectors all refuse to pick for you.
 
 > `test_ambiguous_selectors_die`, `test_unknown_selectors_die`
 
+### S14 - The browser UI previews before a batch write
+
+The local browser UI discovers sessions itself and delegates each transfer to
+the existing dry-run CLI. A one-use preview ID is required to apply a batch.
+It rechecks the dry-run and hashes selected source files immediately before
+writing, so a changed source cancels the batch. Source transcripts and source
+metadata remain untouched.
+
+> `test_ui_bulk_copy_previews_then_preserves_sources`,
+> `test_ui_rejects_changed_source_and_foreign_browser`,
+> `test_ui_adopts_wsl_session_without_touching_transcript`,
+> `test_ui_claude_to_codex_preview_is_read_only`
+
+### S15 - The browser UI is reachable only through its local launch URL
+
+The server binds to `127.0.0.1`, requires its random launch token for API
+requests, and rejects foreign origins and hosts. It does not load external
+scripts, fonts, or styles, and it never logs session paths or titles.
+
+> `test_ui_rejects_changed_source_and_foreign_browser`
+
+The read-only peek uses the same token-protected local API. It returns bounded
+text excerpts and never changes a source transcript or selection.
+
+> `test_ui_peek_reads_turns_without_writing`
+
 ---
 
 ## Format

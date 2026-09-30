@@ -17,6 +17,20 @@ at all. Either way, every session is still on your disk. This tool finds them
 and puts them back in the app, so you can pick up where you left off, even when
 the org you were using has run out of quota.
 
+## Open the local browser UI
+
+```bash
+uvx --from claude-session-teleporter claude-sessions ui
+```
+
+No application installer is needed. The UI discovers local sessions, lets you
+peek without clearing your selection, then transfers selected sessions to one
+destination after a dry-run preview. These screenshots use synthetic sessions.
+
+![Session list with the agent filter open and two sessions selected](docs/session-teleporter-ui.png)
+
+![Read-only session peek with the selected row preserved behind it](docs/session-teleporter-peek.png)
+
 ![claude-sessions partitions finds a second org with 2% quota left, copy --from work plans the move and remaps its connectors, and --apply brings both sessions into the signed-in org](https://raw.githubusercontent.com/aviadr1/claude-session-teleporter/main/docs/demo.gif)
 
 <sub>Real output against a demo store built by [`docs/demo_fixture.py`](https://github.com/aviadr1/claude-session-teleporter/blob/main/docs/demo_fixture.py), not your sessions. Re-record with `vhs docs/demo.tape`.</sub>
@@ -45,6 +59,25 @@ the app** (or restart it). The app caches its session list and only re-reads
 the disk when you do.
 
 No uv? The tool is [one standard-library file](#install) you can download and run.
+
+### Local browser UI
+
+`claude-sessions ui` opens a browser window served from `127.0.0.1`. It finds
+sessions itself; there is no file picker. Filter the list by one or more source
+agents, click a session to peek at its conversation without losing your
+selection, then select a few sessions and choose one destination agent or Claude
+organization. Review the dry-run preview and confirm one bulk transfer.
+Originals remain in place. The page and session data stay on your computer;
+the browser does not upload them. The server uses a private launch URL and
+stops when you press Ctrl+C in its terminal.
+
+Run it in a **Windows terminal** to discover Windows Claude Desktop partitions
+and the local Windows Claude/Codex transcripts (including reachable WSL
+distros). Running it inside WSL sees that distro's local files instead. From
+a source checkout, use `python claude_sessions.py ui`; an installed copy uses
+`claude-sessions ui`. `--no-browser` prints the local URL if you want to open
+it yourself. The UI finds Claude Desktop session partitions in both traditional
+Windows installs and Microsoft Store installs.
 
 ## Teleport between Claude and Codex
 
