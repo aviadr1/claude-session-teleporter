@@ -45,7 +45,7 @@ build-backend = "hatchling.build"
 only-include = ["claude_sessions.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["claude_sessions.py", "README.md", "CHANGELOG.md", "INVARIANTS.md", "LICENSE", "tests", "docs/demo_fixture.py"]
+include = ["claude_sessions.py", "README.md", "CHANGELOG.md", "INVARIANTS.md", "LICENSE", "tests", "docs/demo_fixture.py", "docs/session-teleporter-ui.png", "docs/session-teleporter-peek.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
