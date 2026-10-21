@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `sessions -s TERM` finds sessions by title substring or id prefix across
+  every partition at once, archived included. Repeat `-s` for synonyms; it
+  combines with `-p` and `-n`, and with `-H` for WSL sessions.
+
+### Fixed
+
+- Find the session store of Microsoft Store installs that keep it under
+  `%LOCALAPPDATA%\Claude-Data\<package>\claude-code-sessions`. When several
+  stores exist, use the one the app wrote to last instead of the first found.
+- When no store is found, list every folder checked and name
+  `CLAUDE_SESSIONS_ROOT`, instead of reporting only the classic path.
+- `sessions -n` now limits a partition listing; it applied only with `-H`.
+
 ## 1.3.0 — 2026-10-01
 
 ### Added

@@ -90,27 +90,41 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 
+def store_candidates() -> list[Path]:
+    """Every place a desktop build is known to keep its session store, most conventional first."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:  # Windows
+        found = [Path(appdata) / "Claude" / "claude-code-sessions"]
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            local = Path(local_appdata)
+            # Microsoft Store installs: older builds redirect Roaming AppData inside
+            # the package, newer ones keep a per-package folder under Claude-Data.
+            found += sorted(local.glob("Packages/Claude_*/LocalCache/Roaming/Claude/claude-code-sessions"))
+            found += sorted(local.glob("Claude-Data/*/claude-code-sessions"))
+        return found
+    return [
+        Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions",
+        Path.home() / ".config" / "Claude" / "claude-code-sessions",
+    ]
+
+
+def _last_session_write(store: Path) -> float:
+    stamps = [p.stat().st_mtime for p in store.glob("*/*/local_*.json")]
+    return max(stamps, default=store.stat().st_mtime)
+
+
 def sessions_root() -> Path:
     override = os.environ.get("CLAUDE_SESSIONS_ROOT")
     if override:
         return Path(override)
-    appdata = os.environ.get("APPDATA")
-    if appdata:  # Windows
-        classic = Path(appdata) / "Claude" / "claude-code-sessions"
-        if classic.exists():
-            return classic
-        # Microsoft Store installs redirect Roaming AppData inside the package.
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            packages = Path(local_appdata) / "Packages"
-            stores = list(packages.glob("Claude_*/LocalCache/Roaming/Claude/claude-code-sessions"))
-            if stores:
-                return max(stores, key=lambda p: p.stat().st_mtime)
-        return classic
-    mac = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
-    if mac.exists():
-        return mac
-    return Path.home() / ".config" / "Claude" / "claude-code-sessions"
+    candidates = store_candidates()
+    existing = [p for p in candidates if p.is_dir()]
+    if not existing:
+        return candidates[0]
+    # Moving between install types leaves the old store behind; the live one is
+    # whichever the app wrote to last.
+    return max(existing, key=_last_session_write)
 
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -749,7 +763,14 @@ def wsl_transcript(sess: Session) -> Path | None:
 def load_partitions() -> list[Partition]:
     root = sessions_root()
     if not root.exists():
-        die(f"session store not found: {root}")
+        if os.environ.get("CLAUDE_SESSIONS_ROOT"):
+            die(f"session store not found: {root} (from CLAUDE_SESSIONS_ROOT)")
+        searched = "\n".join(f"  {p}" for p in store_candidates())
+        die(
+            "no Claude desktop session store found. Looked in:\n"
+            f"{searched}\n"
+            "Set CLAUDE_SESSIONS_ROOT to the claude-code-sessions folder (it holds <account>/<org>/local_*.json)."
+        )
     labels = _read_json(LABELS_PATH, {})
     ident = signed_in_identity()
     usage = latest_usage_by_org()
@@ -1113,6 +1134,8 @@ def cmd_hosts(args) -> int:
 
 def cmd_sessions(args) -> int:
     if args.agent:
+        if args.search:
+            die("--search does not apply with --agent")
         return cmd_agent_sessions(args)
     if args.home:
         die('--home requires --agent claude or --agent codex')
@@ -1121,8 +1144,12 @@ def cmd_sessions(args) -> int:
     parts = load_partitions()
     if args.partition:
         parts = [resolve_partition(parts, args.partition)]
+    if args.search:
+        return _search_partitions(parts, args)
     for p in parts:
         sel = sorted(p.sessions if args.all else p.unarchived, key=lambda s: -s.last_activity)
+        if args.limit:
+            sel = sel[: args.limit]
         head = f"{p.name}  ({p.org})" + (f"  {G.dot} signed in" if p.signed_in else "")
         print(head)
         print(G.h * len(head))
@@ -1151,6 +1178,54 @@ def cmd_sessions(args) -> int:
     return 0
 
 
+def matches_search(session_id: str, title: str, terms: list[str]) -> bool:
+    """The same rule `copy -s` resolves by: an id prefix or a title substring."""
+    for term in terms:
+        t = term[len("local_") :] if term.startswith("local_") else term
+        if session_id.startswith(t) or t.lower() in title.lower():
+            return True
+    return False
+
+
+def _search_partitions(parts: list[Partition], args) -> int:
+    """Every partition at once, archived included - you are looking for one thing."""
+    hits = [
+        (p, s)
+        for p in parts
+        for s in p.sessions
+        if matches_search(s.uuid, s.title, args.search)
+    ]
+    hits.sort(key=lambda ps: -ps[1].last_activity)
+    shown = hits[: args.limit] if args.limit else hits
+    rows = []
+    for p, s in shown:
+        flags = (
+            ("A" if s.archived else " ")
+            + (" " if s.transcript else "!")
+            + ("W" if s.is_wsl else "R" if s.is_remote else " ")
+        )
+        rows.append(
+            [
+                flags,
+                trunc(p.name, 14) + (f" {G.dot}" if p.signed_in else ""),
+                s.uuid[:8],
+                ts(s.last_activity),
+                trunc(s.title, 54),
+                trunc(s.branch or Path(s.cwd).name, 30),
+            ]
+        )
+    terms = ", ".join(repr(t) for t in args.search)
+    if not rows:
+        print(f"no session in {len(parts)} partition(s) matches {terms}")
+        return 0
+    print(table(["FLG", "PARTITION", "ID", "LAST ACTIVITY", "TITLE", "BRANCH/DIR"], rows))
+    print(
+        f"({len(shown)} of {len(hits)} matching {terms}, archived included)"
+        f"   flags: A=archived  !=transcript missing  R=ssh/remote  W=runs in WSL\n"
+    )
+    return 0
+
+
 def _sessions_on_host(args) -> int:
     """List CLI sessions on a host that has no desktop metadata at all."""
     host = resolve_host(args.host)
@@ -1167,6 +1242,8 @@ def _sessions_on_host(args) -> int:
         cli = [c for c in cli if c.born_in_cli]
     elif args.desktop:
         cli = [c for c in cli if not c.born_in_cli]
+    if args.search:
+        cli = [c for c in cli if matches_search(c.cli_id, c.title, args.search)]
     shown = cli[: args.limit] if args.limit else cli
 
     head = f"{host.name}  ({host.projects})"
@@ -1759,7 +1836,11 @@ to keep going in the app rather than the terminal.
 ## Mental model
 
 1. **Everything is local.** Nothing is in the cloud, nothing syncs between
-   machines. Metadata: `%APPDATA%/Claude/claude-code-sessions/<account>/<org>/local_<id>.json`.
+   machines. Metadata: `claude-code-sessions/<account>/<org>/local_<id>.json`,
+   under `%APPDATA%\\Claude` for a classic Windows install and under
+   `%LOCALAPPDATA%\\Claude-Data\\<package>` (or the older
+   `Packages\\Claude_*\\LocalCache\\Roaming\\Claude`) for a Microsoft Store one.
+   `partitions` prints the store it chose on its first line.
 2. **Metadata is partitioned by account and org; transcripts are not.**
    Transcripts sit in `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`,
    shared by every partition. `copy` moves one small JSON file - the
@@ -1782,7 +1863,11 @@ Always dry run first. Every write command is dry run by default.
 ```bash
 {run} partitions              # orgs on this machine, quota left in each
 {run} hosts                   # this machine + WSL distros, with unadopted counts
+{run} sessions -s <words>     # find sessions by title in every partition, archived too
 ```
+
+When the user describes sessions by topic, search with `-s` (repeat it for
+synonyms) rather than listing whole partitions.
 
 Then, on the partition axis:
 
@@ -1901,6 +1986,9 @@ terminal and was later opened in the app too.
   can be built. With none, MCP config is stripped and the app repopulates it.
 - `~/.claude/session-copy-ledger.json` records imports so previously copied
   sessions do not poison the connector map. Do not hand-edit it.
+- "no Claude desktop session store found" lists every folder it checked. If the
+  app keeps its store somewhere new, set `CLAUDE_SESSIONS_ROOT` to that
+  `claude-code-sessions` folder - it applies to every command.
 - Formats are reverse-engineered and Anthropic can change them. If output looks
   wrong, inspect a session JSON with `Read` before acting.
 '''
@@ -1925,6 +2013,10 @@ HOW IT IS STORED
   metadata    %APPDATA%/Claude/claude-code-sessions/<account>/<org>/local_<id>.json
   transcript  ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
   tombstone   .../<org>/deleted_<id>
+
+  Microsoft Store installs keep claude-code-sessions under
+  %LOCALAPPDATA%/Claude-Data/<package>/ instead; `partitions` prints which
+  store it found.
 
   Metadata is partitioned. Transcripts are NOT - every partition shares one
   pool. So teleporting a session copies one small JSON file. The conversation
@@ -1952,6 +2044,10 @@ STEP 3 - LOOK AT WHAT IS OVER THERE
      A   archived
      !   transcript missing - cannot be continued
      R   ssh/remote - resumes only if that host is reachable
+
+  Looking for something specific? Search every partition, archived included:
+
+  $ {tool} sessions -s "sports" -s "card"
 
 STEP 4 - DRY RUN
 
@@ -3867,6 +3963,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     sp.add_argument("-a", "--all", action="store_true", help="include archived sessions")
     sp.add_argument("-n", "--limit", type=int, metavar="N", help="show only the N most recent")
+    sp.add_argument(
+        "-s", "--search", action="append", default=[], metavar="TERM",
+        help="find sessions by id prefix or title substring across every partition, "
+        "archived included (repeatable; any term matches)",
+    )
     sp.add_argument("--agent", choices=("claude", "codex"), help="list transcript paths for cross-client teleport (20 most recent by default)")
     sp.add_argument("--home", metavar="DIR", help="with --agent: read this .claude/.codex directory")
     origin = sp.add_mutually_exclusive_group()

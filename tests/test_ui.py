@@ -2,9 +2,11 @@
 
 import http.client
 import json
+import os
 import threading
 from pathlib import Path
 
+import pytest
 from conftest import cs
 
 
@@ -18,6 +20,40 @@ def test_sessions_root_finds_microsoft_store_claude(tmp_path, monkeypatch):
     override = tmp_path / 'chosen-store'
     monkeypatch.setenv('CLAUDE_SESSIONS_ROOT', str(override))
     assert cs.sessions_root() == override
+
+
+def test_sessions_root_finds_claude_data_store(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLAUDE_SESSIONS_ROOT', raising=False)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    store = tmp_path / 'Local' / 'Claude-Data' / 'claude_test' / 'claude-code-sessions'
+    store.mkdir(parents=True)
+    assert cs.sessions_root() == store
+
+
+def test_sessions_root_prefers_the_store_written_last(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLAUDE_SESSIONS_ROOT', raising=False)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    stale = tmp_path / 'Roaming' / 'Claude' / 'claude-code-sessions'
+    live = tmp_path / 'Local' / 'Claude-Data' / 'claude_test' / 'claude-code-sessions'
+    for store, stamp in ((stale, 1_700_000_000), (live, 1_800_000_000)):
+        session = store / 'account' / 'org' / 'local_x.json'
+        session.parent.mkdir(parents=True)
+        session.write_text('{}', encoding='utf-8')
+        os.utime(session, (stamp, stamp))
+    assert cs.sessions_root() == live
+
+
+def test_missing_store_error_lists_every_folder_checked(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv('CLAUDE_SESSIONS_ROOT', raising=False)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    with pytest.raises(SystemExit):
+        cs.load_partitions()
+    err = capsys.readouterr().err
+    assert str(tmp_path / 'Roaming' / 'Claude' / 'claude-code-sessions') in err
+    assert 'CLAUDE_SESSIONS_ROOT' in err
 
 
 def test_ui_search_catalog_includes_older_sessions(world):
