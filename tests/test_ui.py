@@ -53,6 +53,7 @@ def test_missing_store_error_lists_every_folder_checked(tmp_path, monkeypatch, c
         cs.load_partitions()
     err = capsys.readouterr().err
     assert str(tmp_path / 'Roaming' / 'Claude' / 'claude-code-sessions') in err
+    assert str(tmp_path / 'Local' / 'Claude-Data' / '*' / 'claude-code-sessions') in err
     assert 'CLAUDE_SESSIONS_ROOT' in err
 
 

@@ -90,6 +90,14 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 
+# Microsoft Store installs, under %LOCALAPPDATA%: older builds redirect Roaming
+# AppData inside the package, newer ones keep a per-package folder in Claude-Data.
+STORE_PACKAGE_GLOBS = (
+    "Packages/Claude_*/LocalCache/Roaming/Claude/claude-code-sessions",
+    "Claude-Data/*/claude-code-sessions",
+)
+
+
 def store_candidates() -> list[Path]:
     """Every place a desktop build is known to keep its session store, most conventional first."""
     appdata = os.environ.get("APPDATA")
@@ -97,11 +105,8 @@ def store_candidates() -> list[Path]:
         found = [Path(appdata) / "Claude" / "claude-code-sessions"]
         local_appdata = os.environ.get("LOCALAPPDATA")
         if local_appdata:
-            local = Path(local_appdata)
-            # Microsoft Store installs: older builds redirect Roaming AppData inside
-            # the package, newer ones keep a per-package folder under Claude-Data.
-            found += sorted(local.glob("Packages/Claude_*/LocalCache/Roaming/Claude/claude-code-sessions"))
-            found += sorted(local.glob("Claude-Data/*/claude-code-sessions"))
+            for pattern in STORE_PACKAGE_GLOBS:
+                found += sorted(Path(local_appdata).glob(pattern))
         return found
     return [
         Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions",
@@ -765,7 +770,11 @@ def load_partitions() -> list[Partition]:
     if not root.exists():
         if os.environ.get("CLAUDE_SESSIONS_ROOT"):
             die(f"session store not found: {root} (from CLAUDE_SESSIONS_ROOT)")
-        searched = "\n".join(f"  {p}" for p in store_candidates())
+        searched = [str(p) for p in store_candidates()]
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            searched += [str(Path(local_appdata) / pattern) for pattern in STORE_PACKAGE_GLOBS]
+        searched = "\n".join(f"  {p}" for p in dict.fromkeys(searched))
         die(
             "no Claude desktop session store found. Looked in:\n"
             f"{searched}\n"
