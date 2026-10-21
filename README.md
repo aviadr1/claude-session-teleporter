@@ -296,6 +296,12 @@ syncs between machines.
 | Transcript | `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl` |
 | Deletion tombstone | `.../<orgUuid>/deleted_<id>` |
 
+Microsoft Store installs keep `claude-code-sessions` under
+`%LOCALAPPDATA%/Claude-Data/<package>/` (older builds:
+`%LOCALAPPDATA%/Packages/Claude_*/LocalCache/Roaming/Claude/`). When more than
+one store exists, the tool uses the one the app wrote to last; `partitions`
+prints which. `CLAUDE_SESSIONS_ROOT` overrides the choice.
+
 Three consequences drive this whole tool:
 
 1. **Metadata is partitioned by account *and* org; transcripts are not.** Two
