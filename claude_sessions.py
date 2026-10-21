@@ -6,6 +6,7 @@ account/org partitions, and between WSL and the Windows desktop app.
 Claude Code stores sessions entirely on local disk, in two pieces:
 
   metadata    %APPDATA%/Claude/claude-code-sessions/<accountUuid>/<orgUuid>/local_<id>.json
+              (Microsoft Store: %LOCALAPPDATA%/Claude-Data/<package>/claude-code-sessions/...)
   transcript  ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
 
 The desktop app only shows the partition you are currently signed into, so
@@ -127,6 +128,8 @@ def sessions_root() -> Path:
     existing = [p for p in candidates if p.is_dir()]
     if not existing:
         return candidates[0]
+    if len(existing) == 1:
+        return existing[0]
     # Moving between install types leaves the old store behind; the live one is
     # whichever the app wrote to last.
     return max(existing, key=_last_session_write)
@@ -2269,6 +2272,7 @@ note:
 
 storage:
   metadata    %APPDATA%/Claude/claude-code-sessions/<accountUuid>/<orgUuid>/local_<id>.json
+              (Microsoft Store: %LOCALAPPDATA%/Claude-Data/<package>/claude-code-sessions/...)
   transcript  ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
   in WSL      \\\\wsl.localhost\\<distro>\\home\\<user>\\.claude\\projects\\...  (no metadata)
 
