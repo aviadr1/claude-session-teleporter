@@ -46,6 +46,8 @@ Commands:
   copy         copy sessions between partitions (dry-run by default)
   adopt        surface WSL CLI sessions in the desktop app (dry-run by default)
   eject        put a desktop session's transcript where the WSL CLI finds it
+  pack         put sessions in one zip, for another machine or WSL
+  unpack       restore a pack's sessions to the app, the CLI, or WSL
   teleport     fork conversation history between Claude and Codex
   ui           select and transfer several local sessions in a browser
   codex-project assign an imported Codex session to a desktop project
@@ -65,6 +67,7 @@ Safety invariants for `copy`:
 
 `adopt` and `eject` inherit all of those, and additionally never write into the
 source host: adopt only writes desktop metadata, eject only writes into WSL.
+`pack` only reads; `unpack` treats a pack as untrusted input.
 """
 
 from __future__ import annotations
@@ -82,6 +85,7 @@ import time
 import tempfile
 import threading
 import uuid as _uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,7 +148,7 @@ LEDGER_PATH = Path.home() / ".claude" / "session-copy-ledger.json"
 VOLATILE_FIELDS = ("sshRemoteProcessId",)
 ERROR_FIELDS = ("error", "errorAt", "errorCategory")
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 SKILL_DIR = Path.home() / ".claude" / "skills" / "claude-session-teleporter"
 
 # distros that ship with Docker Desktop and never host a Claude Code install
@@ -433,7 +437,7 @@ class Session:
         return {
             s.get("name"): s.get("uuid")
             for s in (self.data.get("remoteMcpServersConfig") or [])
-            if s.get("name") and s.get("uuid")
+            if isinstance(s, dict) and s.get("name") and s.get("uuid")
         }
 
 
@@ -1713,29 +1717,36 @@ def cmd_adopt(args) -> int:
 # ---------------------------------------------------------------------------
 
 
-def rewrite_cwd(src: Path, dst_path: Path, new_cwd: str) -> tuple[int, int]:
+def remap_cwd_lines(lines, remap) -> tuple[str, int, int]:
     """
-    Copy a transcript, rewriting the top-level `cwd` on every record.
+    Rewrite the top-level `cwd` on every transcript record via `remap(old)`.
 
     Only that one key is touched. Paths quoted inside the conversation are
     history - rewriting them would corrupt tool results that legitimately
-    describe a Windows filesystem.
+    describe a Windows filesystem. Returns (text, records, records rewritten).
     """
+    out, count, touched = [], 0, 0
+    for line in lines:
+        count += 1
+        if '"cwd"' in line:
+            rec = _loads(line)
+            if rec and rec.get("cwd"):
+                rec["cwd"] = remap(rec["cwd"])
+                # compact, the way Claude Code itself writes records
+                out.append(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+                touched += 1
+                continue
+        out.append(line if line.endswith("\n") else line + "\n")
+    return "".join(out), count, touched
+
+
+def rewrite_cwd(src: Path, dst_path: Path, new_cwd: str) -> tuple[int, int]:
+    """Copy a transcript, rewriting the top-level `cwd` on every record to `new_cwd`."""
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    lines, touched = 0, 0
-    with src.open(encoding="utf-8", errors="replace") as fin, open(
-        dst_path, "x", encoding="utf-8", newline="\n"
-    ) as fout:
-        for line in fin:
-            lines += 1
-            if '"cwd"' in line:
-                rec = _loads(line)
-                if rec and rec.get("cwd"):
-                    rec["cwd"] = new_cwd
-                    fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    touched += 1
-                    continue
-            fout.write(line if line.endswith("\n") else line + "\n")
+    with src.open(encoding="utf-8", errors="replace") as fin:
+        text, lines, touched = remap_cwd_lines(fin, lambda _: new_cwd)
+    with open(dst_path, "x", encoding="utf-8", newline="\n") as fout:
+        fout.write(text)
     return lines, touched
 
 
@@ -1808,9 +1819,639 @@ def cmd_eject(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# pack / unpack: carry sessions in one file - to another machine, or into WSL
+# ---------------------------------------------------------------------------
+
+
+PACK_FORMAT = "claude-session-pack"
+PACK_VERSION = 1
+PACK_MANIFEST = "manifest.json"
+# A pack is untrusted input. Every name that becomes a path component on unpack
+# must look like one Claude Code itself writes: no separators, no `..`, no drive.
+SAFE_PART = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+# permission modes a pack may carry in; anything looser arrives as auto
+PACK_KEPT_MODES = ("default", "plan", "auto")
+# approvals granted on the machine the session came from - never carried in
+PERMISSION_FIELDS = ("alwaysAllowedReasons", "sessionPermissionUpdates")
+# which path spelling this machine's CLI uses; a constant so tests can play either
+LOCAL_IS_WINDOWS = os.name == "nt"
+
+PACK = "PACK"
+UNPACK = "UNPACK"
+SKIP_OLD = "skip: older than --since"
+SKIP_WSL = "skip: runs in WSL"
+SKIP_REMOTE = "skip: ssh/remote"
+SKIP_DIFFERENT = "skip: different transcript there"
+SKIP_UNMAPPABLE = "skip: cwd unreachable there"
+SKIP_DAMAGED = "skip: damaged in pack"
+
+
+def parse_since(text: str) -> int:
+    """'90m', '4h', '2d', '1w' -> milliseconds."""
+    m = re.fullmatch(r"(\d+)\s*([mhdw])", text.strip().lower())
+    if not m:
+        die(f"--since takes a number and a unit (m, h, d or w), e.g. 4h - not {text!r}")
+    return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2)] * 1000
+
+
+def session_files(transcript: Path) -> list[tuple[Path, str]]:
+    """
+    A transcript plus the directory Claude Code keeps beside it - subagent
+    transcripts, persisted tool results, a custom title - as (path, name
+    relative to the project directory). The transcript comes first.
+    """
+    files = [(transcript, transcript.name)]
+    side = transcript.parent / transcript.stem
+    if side.is_dir():
+        files += [
+            (p, p.relative_to(transcript.parent).as_posix())
+            for p in sorted(side.rglob("*"))
+            if p.is_file()
+        ]
+    return files
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def pack_connectors(sessions: list[Session], known: dict[str, str]) -> dict[str, str]:
+    """uuid -> name for every connector the packed sessions mention, tool keys included."""
+    out: dict[str, str] = {}
+    for s in sessions:
+        for name, uuid in s.servers.items():
+            out[uuid] = name
+        for key in (s.data.get("enabledMcpTools") or {}):
+            uuid = key.partition(":")[0]
+            if uuid in known:
+                out.setdefault(uuid, known[uuid])
+    return out
+
+
+def write_new(path: Path, data: bytes) -> None:
+    """Exclusive create. A half-written file is removed, never left behind."""
+    with open(path, "xb") as fh:
+        try:
+            fh.write(data)
+        except BaseException:
+            fh.close()
+            path.unlink(missing_ok=True)
+            raise
+
+
+def cmd_pack(args) -> int:
+    parts = load_partitions()
+    src = resolve_partition(parts, args.source or "active")
+    pool = resolve_sessions(src, args.session) if args.session else src.sessions
+    cutoff = int(time.time() * 1000) - parse_since(args.since) if args.since else 0
+
+    plan = []
+    for s in pool:
+        if s.last_activity < cutoff:
+            plan.append((s, SKIP_OLD))
+        elif s.archived and not args.include_archived:
+            plan.append((s, SKIP_ARCHIVED))
+        elif s.is_wsl:
+            plan.append((s, SKIP_WSL))
+        elif s.is_remote:
+            plan.append((s, SKIP_REMOTE))
+        elif not s.transcript:
+            plan.append((s, SKIP_NO_TRANSCRIPT))
+        else:
+            plan.append((s, PACK))
+    plan.sort(key=lambda x: (x[1] != PACK, -x[0].last_activity))
+    todo = [s for s, st in plan if st == PACK]
+    files = {s.uuid: session_files(s.transcript) for s in todo}
+    size = sum(p.stat().st_size for fs in files.values() for p, _ in fs)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    out = Path(args.output or f"claude-sessions-{re.sub(r'[^A-Za-z0-9._-]+', '-', src.name)}-{stamp}.zip")
+
+    # Filtered-out sessions would bury the plan in a partition of hundreds;
+    # they are counted below instead of listed.
+    quiet = (SKIP_OLD, SKIP_ARCHIVED) if not args.session else ()
+    rows = [
+        [
+            G.check if st == PACK else G.cross,
+            st,
+            s.uuid[:8],
+            ts(s.last_activity),
+            trunc(s.title, 44),
+            trunc(s.branch or Path(s.cwd).name, 28),
+            str(len(files[s.uuid])) if st == PACK else "",
+        ]
+        for s, st in plan
+        if st not in quiet
+    ]
+    print(f"\nfrom {src.name} ({src.org})\n")
+    if rows:
+        print(table([" ", "ACTION", "ID", "LAST ACTIVITY", "TITLE", "BRANCH/DIR", "FILES"], rows))
+    counts: dict[str, int] = {}
+    for _, st in plan:
+        counts[st] = counts.get(st, 0) + 1
+    print("\n" + "   ".join(f"{v} {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])))
+    if counts.get(SKIP_ARCHIVED) and not args.include_archived:
+        print("archived sessions are left out unless you pass --include-archived.")
+    print(f"{sum(len(f) for f in files.values())} files, {size / 1e6:.1f} MB before compression.")
+    warn(
+        "a pack holds whole conversations - tool output, file contents, anything "
+        "pasted. Treat it like the code and secrets those sessions touched."
+    )
+
+    if out.exists():
+        die(f"{out} already exists - name another with -o. Nothing is overwritten.")
+    if not args.apply:
+        print(f"\nDRY RUN. Nothing written. Re-run with --apply to write {len(todo)} session(s) to {out}.")
+        return 0
+    if not todo:
+        print("\nNothing to do.")
+        return 0
+
+    known = connector_names(parts)
+    entries = []
+    try:
+        fh = open(out, "xb")
+    except FileExistsError:
+        die(f"{out} appeared mid-run; left alone")
+    try:
+        with fh, zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as z:
+            for s in todo:
+                project_dir = s.transcript.parent.name
+                listed = []
+                for path, rel in files[s.uuid]:
+                    # read once: the bytes hashed are the bytes stored, even if
+                    # a live session appends to its transcript meanwhile
+                    data = path.read_bytes()
+                    z.writestr(f"projects/{project_dir}/{rel}", data)
+                    listed.append({"path": rel, "sha256": _sha256(data), "size": len(data)})
+                z.writestr(f"sessions/{s.session_id}.json", json.dumps(s.data, indent=2))
+                c = read_cli_session(WINDOWS_HOST, s.transcript, deep=False)
+                entries.append(
+                    {
+                        "uuid": s.uuid,
+                        "cliSessionId": s.cli_session_id,
+                        "title": s.title,
+                        "lastActivityAt": s.last_activity,
+                        "projectDir": project_dir,
+                        "cwd": c.cwd if c else s.cwd,
+                        "originCwd": c.origin_cwd if c else s.data.get("originCwd") or s.cwd,
+                        "metadata": f"sessions/{s.session_id}.json",
+                        "files": listed,
+                    }
+                )
+                print(f"{G.check} {s.uuid[:8]}  {trunc(s.title, 60)}")
+            manifest = {
+                "format": PACK_FORMAT,
+                "version": PACK_VERSION,
+                "tool": f"claude-session-teleporter {__version__}",
+                "createdAt": int(time.time() * 1000),
+                "source": {
+                    "platform": sys.platform,
+                    "account": src.account,
+                    "org": src.org,
+                    "partition": src.name,
+                },
+                "connectors": pack_connectors(todo, known),
+                "sessions": entries,
+            }
+            z.writestr(PACK_MANIFEST, json.dumps(manifest, indent=2))
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise
+    print(f"\nPacked {len(entries)} session(s) into {out} ({out.stat().st_size / 1e6:.1f} MB).")
+    print("Nothing in the source was changed. On the other side:\n")
+    print(f"  claude_sessions.py unpack {out.name}                    DRY RUN into the signed-in org")
+    print(f"  claude_sessions.py unpack {out.name} --host wsl:Ubuntu  DRY RUN for the CLI inside WSL")
+    return 0
+
+
+@dataclass
+class PackEntry:
+    uuid: str
+    cli_id: str
+    title: str
+    project_dir: str
+    cwd: str
+    last_activity: int
+    metadata: str
+    files: list[dict]
+
+    @property
+    def session_id(self) -> str:
+        return f"local_{self.uuid}"
+
+
+def _pack_entry(raw, members: set[str]) -> PackEntry:
+    """Validate one manifest entry. A pack that fails here is refused whole, before any write."""
+    if not isinstance(raw, dict):
+        die("damaged pack: a manifest entry is not an object")
+    uuid, cli_id, project_dir = raw.get("uuid"), raw.get("cliSessionId"), raw.get("projectDir")
+    for label, value in (("uuid", uuid), ("cliSessionId", cli_id), ("projectDir", project_dir)):
+        if not isinstance(value, str) or not SAFE_PART.match(value):
+            die(f"refusing pack: unsafe {label} {value!r} in manifest")
+    cwd, metadata, files = raw.get("cwd"), raw.get("metadata"), raw.get("files")
+    if not isinstance(cwd, str) or not cwd:
+        die(f"refusing pack: session {uuid} has no cwd")
+    if metadata != f"sessions/local_{uuid}.json" or metadata not in members:
+        die(f"refusing pack: session {uuid} names metadata {metadata!r}")
+    if not isinstance(files, list) or not files:
+        die(f"refusing pack: session {uuid} lists no files")
+    for f in files:
+        rel = f.get("path") if isinstance(f, dict) else None
+        digest = f.get("sha256") if isinstance(f, dict) else None
+        parts = rel.split("/") if isinstance(rel, str) else []
+        inside = rel == f"{cli_id}.jsonl" or (len(parts) > 1 and parts[0] == cli_id)
+        if not parts or not inside or not all(SAFE_PART.match(p) for p in parts):
+            die(f"refusing pack: unsafe file path {rel!r} in session {uuid}")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            die(f"refusing pack: file {rel!r} in session {uuid} has no sha256")
+        if f"projects/{project_dir}/{rel}" not in members:
+            die(f"refusing pack: file {rel!r} of session {uuid} is missing from the archive")
+    if not any(f["path"] == f"{cli_id}.jsonl" for f in files):
+        die(f"refusing pack: session {uuid} has no transcript")
+    return PackEntry(
+        uuid=uuid,
+        cli_id=cli_id,
+        title=str(raw.get("title") or "(untitled)"),
+        project_dir=project_dir,
+        cwd=cwd,
+        last_activity=int(raw.get("lastActivityAt") or 0),
+        metadata=metadata,
+        files=files,
+    )
+
+
+def read_pack(z: zipfile.ZipFile) -> tuple[dict, list[PackEntry]]:
+    try:
+        manifest = json.loads(z.read(PACK_MANIFEST))
+    except KeyError:
+        die("not a session pack: it has no manifest.json. Make one with the pack command.")
+    except ValueError:
+        die("damaged pack: manifest.json is not valid JSON")
+    if not isinstance(manifest, dict) or manifest.get("format") != PACK_FORMAT:
+        die("not a session pack: manifest.json is not in this tool's format")
+    version = manifest.get("version")
+    if not isinstance(version, int) or version > PACK_VERSION:
+        die(f"this pack is format {version!r}; this version of the tool reads up to {PACK_VERSION}. Upgrade it.")
+    members = set(z.namelist())
+    entries = [_pack_entry(raw, members) for raw in manifest.get("sessions") or []]
+    if len({e.uuid for e in entries}) != len(entries):
+        die("refusing pack: the same session appears twice")
+    return manifest, entries
+
+
+def parse_cwd_maps(specs: list[str]) -> list[tuple[str, str]]:
+    maps = []
+    for spec in specs:
+        old, sep, new = spec.partition("=")
+        if not sep or not old or not new:
+            die(f"--map-cwd takes OLD=NEW, e.g. C:\\Users\\me=/home/me - not {spec!r}")
+        maps.append((old.rstrip("\\/") or old, new.rstrip("\\/") or new))
+    return sorted(maps, key=lambda m: -len(m[0]))  # most specific first
+
+
+def _is_drive_path(p: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:([\\/]|$)", p))
+
+
+def map_cwd(path: str, maps: list[tuple[str, str]], host: Host) -> str | None:
+    """
+    Where `path` is spelled on `host`: --map-cwd prefixes first, then a drive
+    path becomes /mnt/<drive>/... inside WSL. None when the host cannot reach it.
+    """
+    for old, new in maps:
+        hit = path.lower().startswith(old.lower()) if _is_drive_path(old) else path.startswith(old)
+        if hit and (len(path) == len(old) or path[len(old)] in "\\/"):
+            rest = path[len(old):]
+            if new.startswith("/"):
+                rest = rest.replace("\\", "/")
+            elif _is_drive_path(new) or new.startswith("\\\\"):
+                rest = rest.replace("/", "\\")
+            path = new + rest
+            break
+    if host.is_wsl:
+        if _is_drive_path(path):
+            return win_to_wsl_path(path)
+        return path if path.startswith("/") else None
+    if LOCAL_IS_WINDOWS:
+        return path if _is_drive_path(path) or path.startswith("\\\\") else None
+    return path if path.startswith("/") else None
+
+
+def workdir_on(host: Host, cwd: str) -> Path:
+    """`cwd` on `host`, as a path this process can test for existence."""
+    if host.is_wsl:
+        if re.match(r"^/mnt/[a-zA-Z]/", cwd):
+            return Path(wsl_to_win_path(cwd, host.distro or ""))
+        return host.root / cwd.lstrip("/")
+    return Path(cwd)
+
+
+@dataclass
+class UnpackItem:
+    entry: PackEntry
+    action: str
+    cwd: str = ""                # where the session resumes on the destination
+    writes: list[tuple[Path, bytes]] = field(default_factory=list)
+    metadata: dict | None = None
+    rewritten: int = 0           # cwd fields rewritten across its .jsonl files
+    notes: list[str] = field(default_factory=list)
+
+
+def build_unpacked(
+    e: PackEntry, raw: dict, cwd: str, dst: Partition, known: dict[str, str], maps, host: Host
+) -> tuple[dict, list[str]]:
+    """Desktop metadata for a packed session, made valid for `dst` and stripped of grants."""
+    servers = raw.get("remoteMcpServersConfig")
+    raw["remoteMcpServersConfig"] = [s for s in servers if isinstance(s, dict)] if isinstance(servers, list) else []
+    if not isinstance(raw.get("enabledMcpTools"), dict):
+        raw["enabledMcpTools"] = {}
+    data, notes = port_session(Session(uuid=e.uuid, path=Path(e.metadata), data=raw), dst, False, known)
+    # a packed session runs here, on this machine - never somewhere its old
+    # metadata points, whatever a hand-edited pack says
+    for f in ("wslConfig", "sshRemoteTranscriptPath"):
+        data.pop(f, None)
+    data["cwd"] = cwd
+    for f in ("originCwd", "worktreePath"):
+        if isinstance(data.get(f), str) and data[f]:
+            data[f] = map_cwd(data[f], maps, host) or data[f]
+    mode = data.get("permissionMode")
+    if mode not in PACK_KEPT_MODES:
+        if mode is not None:
+            notes.append(f"reset permissionMode {mode} {G.arrow} auto")
+        data["permissionMode"] = "auto"
+    for f in PERMISSION_FIELDS:
+        if data.get(f):
+            notes.append(f"dropped {f} granted on the source machine")
+        data[f] = []
+    return data, notes
+
+
+def plan_unpack(
+    z: zipfile.ZipFile, e: PackEntry, host: Host, dst: Partition | None,
+    maps, known: dict[str, str],
+) -> UnpackItem:
+    item = UnpackItem(entry=e, action=UNPACK)
+    if dst is not None and e.uuid in dst.tombstones:
+        item.action = SKIP_TOMB
+        return item
+    cwd = map_cwd(e.cwd, maps, host)
+    if cwd is None:
+        item.action = SKIP_UNMAPPABLE
+        item.notes.append(f"{e.cwd} has no spelling on {host.name}; add --map-cwd OLD=NEW")
+        return item
+    item.cwd = cwd
+
+    raw_meta = None
+    if dst is not None:
+        raw_meta = _loads(z.read(e.metadata).decode("utf-8", errors="replace"))
+        if not raw_meta or raw_meta.get("sessionId") != e.session_id or raw_meta.get("cliSessionId") != e.cli_id:
+            item.action = SKIP_DAMAGED
+            item.notes.append("metadata does not match the manifest")
+            return item
+
+    moved = cwd != e.cwd
+    target_dir = host.projects / (encode_cwd(cwd) if moved else e.project_dir)
+    present = kept = 0
+    for f in e.files:
+        data = z.read(f"projects/{e.project_dir}/{f['path']}")
+        if _sha256(data) != f["sha256"]:
+            item.action = SKIP_DAMAGED
+            item.notes.append(f"{f['path']} does not match its sha256")
+            return item
+        if moved and f["path"].endswith(".jsonl"):
+            # every record keeps its own history: each cwd maps separately, and
+            # one with no spelling here falls back to where the session resumes
+            text, _, n = remap_cwd_lines(
+                data.decode("utf-8", errors="replace").splitlines(keepends=True),
+                lambda old: map_cwd(old, maps, host) or cwd,
+            )
+            data, item.rewritten = text.encode("utf-8"), item.rewritten + n
+        target = target_dir.joinpath(*f["path"].split("/"))
+        if target.exists():
+            same = target.read_bytes() == data
+            if f["path"] == f"{e.cli_id}.jsonl" and not same:
+                item.action = SKIP_DIFFERENT
+                item.notes.append(f"{target} holds another version of this conversation; left alone")
+                return item
+            present, kept = present + same, kept + (not same)
+            continue
+        item.writes.append((target, data))
+    # sidecars before the transcript: the CLI never sees a transcript whose
+    # subagents and tool results have not landed yet
+    item.writes.sort(key=lambda w: w[0].name == f"{e.cli_id}.jsonl")
+
+    meta_there = dst is not None and (dst.path / f"{e.session_id}.json").exists()
+    if not item.writes and (dst is None or meta_there):
+        item.action = SKIP_EXISTS
+        return item
+    if meta_there:
+        # the backup case: the app still lists the session but its files are
+        # gone. Restore the files; the metadata already there is left alone.
+        item.notes.append("metadata already here; restored its missing files")
+    elif dst is not None:
+        item.metadata, notes = build_unpacked(e, raw_meta, cwd, dst, known, maps, host)
+        item.notes += notes
+
+    if moved:
+        item.notes.append(f"rewrote cwd for {host.name}")
+    if present:
+        item.notes.append("files already here, identical, reused")
+    if kept:
+        item.notes.append("kept differing sidecar files already here")
+    if not workdir_on(host, cwd).is_dir():
+        item.notes.append("working dir not found there - clone or create it to resume")
+    return item
+
+
+def resume_command(host: Host, cwd: str, cli_id: str) -> str:
+    if host.is_wsl:
+        return f"wsl -d {host.distro} --cd {shlex.quote(cwd)} -e claude --resume {cli_id}"
+    if LOCAL_IS_WINDOWS:
+        return f'cd "{cwd}"; claude --resume {cli_id}'
+    return f"cd {shlex.quote(cwd)} && claude --resume {cli_id}"
+
+
+def cmd_unpack(args) -> int:
+    pack = Path(args.pack)
+    if not pack.is_file():
+        die(f"no such pack: {pack}")
+    host = resolve_host(args.host) if args.host else WINDOWS_HOST
+    maps = parse_cwd_maps(args.map_cwd)
+    try:
+        z = zipfile.ZipFile(pack)
+    except zipfile.BadZipFile:
+        die(f"{pack} is not a zip file")
+
+    with z:
+        manifest, entries = read_pack(z)
+        if args.session:
+            pool = []
+            for sel in args.session:
+                cands = [e for e in entries if matches_search(e.uuid, e.title, [sel])]
+                if not cands:
+                    die(f"no session in the pack matches {sel!r}")
+                if len(cands) > 1:
+                    die(f"session {sel!r} is ambiguous: " + ", ".join(f"{c.uuid[:8]} {c.title}" for c in cands))
+                pool.append(cands[0])
+            entries = pool
+
+        # Desktop metadata only makes sense for this machine's own app. A WSL
+        # destination gets transcripts; `adopt` is what shows those in the app.
+        dst, parts, known = None, [], {}
+        if args.to and (args.cli or host.is_wsl):
+            die("--to names a desktop partition, but --cli and --host wsl write transcripts only")
+        if not args.cli and not host.is_wsl:
+            parts = load_partitions()
+            dst = resolve_partition(parts, args.to or "active")
+            known = {
+                k: v for k, v in (manifest.get("connectors") or {}).items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+            known.update(connector_names(parts))
+
+        plan = [plan_unpack(z, e, host, dst, maps, known) for e in entries]
+
+    plan.sort(key=lambda i: (i.action != UNPACK, -i.entry.last_activity))
+    todo = [i for i in plan if i.action == UNPACK]
+
+    src = manifest.get("source") or {}
+    print(f"\npack    {pack.name}  ({len(entries)} session(s), made {ts(int(manifest.get('createdAt') or 0))}"
+          f" from {src.get('partition', '?')} on {src.get('platform', '?')})")
+    print(f"into    {host.name} transcripts at {host.projects}")
+    if dst is not None:
+        print(f"        + desktop metadata in {dst.name} ({dst.org})")
+    else:
+        print("        transcripts only - no desktop metadata")
+    print("every file checked against the manifest's sha256\n")
+    if dst is not None and not dst.signed_in:
+        who = next((p.name for p in parts if p.signed_in), "(none)")
+        warn(f"destination is NOT the signed-in partition - unpacked sessions stay invisible until you "
+             f"sign into org {dst.short}. Signed in right now: {who}.")
+
+    rows = [
+        [
+            G.check if i.action == UNPACK else G.cross,
+            i.action,
+            i.entry.uuid[:8],
+            ts(i.entry.last_activity),
+            trunc(i.entry.title, 40),
+            trunc(i.cwd or i.entry.cwd, 40),
+        ]
+        for i in plan
+    ]
+    print(table([" ", "ACTION", "ID", "LAST ACTIVITY", "TITLE", "CWD THERE"], rows))
+
+    fixes: dict[str, int] = {}
+    for i in plan:
+        for n in i.notes:
+            fixes[n] = fixes.get(n, 0) + 1
+    if fixes:
+        print("\nnotes (count of sessions):")
+        for n, c in sorted(fixes.items(), key=lambda x: -x[1]):
+            print(f"  {c:>2}x  {n}")
+    counts: dict[str, int] = {}
+    for i in plan:
+        counts[i.action] = counts.get(i.action, 0) + 1
+    print("\n" + "   ".join(f"{v} {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])))
+    rewritten = sum(i.rewritten for i in todo)
+    if rewritten:
+        print(f"{rewritten} cwd fields rewritten; paths quoted inside conversations are history and stay as they were.")
+
+    if not args.apply:
+        print(f"\nDRY RUN. Nothing written. Re-run with --apply to unpack {len(todo)} session(s).")
+        return 0
+    if not todo:
+        print("\nNothing to do.")
+        return 0
+
+    written, ledger = [], []
+    for i in todo:
+        mine: list[Path] = []
+        try:
+            for path, data in i.writes:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                write_new(path, data)
+                mine.append(path)
+            if dst is not None and i.metadata is not None:
+                dst.path.mkdir(parents=True, exist_ok=True)
+                with open(dst.path / f"{i.entry.session_id}.json", "x", encoding="utf-8") as fh:
+                    json.dump(i.metadata, fh, indent=2)
+                ledger.append(
+                    {
+                        "uuid": i.entry.uuid,
+                        "src": f"pack:{src.get('org', '?')}",
+                        "dest": dst.org,
+                        "cliSessionId": i.entry.cli_id,
+                        "at": int(time.time() * 1000),
+                    }
+                )
+        except (FileExistsError, OSError) as exc:
+            # only what this run created for this session is removed
+            for p in mine:
+                p.unlink(missing_ok=True)
+            why = "appeared mid-run, left alone" if isinstance(exc, FileExistsError) else str(exc)
+            print(f"{G.cross} {i.entry.uuid[:8]}  {why}")
+            continue
+        written.append(i)
+        print(f"{G.check} {i.entry.uuid[:8]}  {trunc(i.entry.title, 60)}")
+    if ledger:
+        record_copies(ledger)
+
+    print(f"\nUnpacked {len(written)} session(s) into {host.name}" + (f", {dst.name}." if dst else "."))
+    print("Each is an independent copy - the conversation it came from is not linked to it.")
+    if written:
+        print("\nResume from the CLI:\n")
+        for i in written:
+            print(f"  {resume_command(host, i.cwd, i.entry.cli_id)}")
+    if dst is not None:
+        print("\nThe app caches its session list in memory. Switch accounts in the app to")
+        print("force a reload - faster than restarting it, and it works just as well.")
+    elif host.is_wsl:
+        print(f"\nTo see them in the desktop app too:  claude_sessions.py adopt --from {host.name}")
+    return 0
+
+
+PACK_EPILOG = """\
+what is in a pack:
+  One zip: each session's transcript, the directory Claude Code keeps beside it
+  (subagent transcripts, persisted tool results), its desktop metadata, and a
+  manifest with a sha256 for every file. Sessions running in WSL or over ssh are
+  left out - their transcripts live on another host.
+
+  A pack holds whole conversations. Treat it like the code and secrets those
+  sessions touched.
+
+safety:
+  Reads the source and changes nothing in it. Writes one new file and never
+  overwrites one. Dry run unless --apply.
+"""
+
+UNPACK_EPILOG = """\
+where it goes:
+  default        this machine's transcripts, plus desktop metadata in the
+                 signed-in partition (--to another), connectors remapped by name
+  --cli          this machine's transcripts only - a machine with no desktop app
+  --host wsl:X   the CLI inside a distro; C:\\x becomes /mnt/c/x on every record
+
+  Another machine usually keeps code somewhere else. --map-cwd OLD=NEW rewrites
+  a path prefix (repeatable, most specific wins), e.g.
+    --map-cwd C:\\Users\\me\\GitHub=/home/me/src
+
+safety:
+  A pack is untrusted input. Nothing is extracted by its own name: every path is
+  built from a validated manifest, every file checked against its sha256, and a
+  pack with one bad entry is refused before anything is written. Never
+  overwrites a session or a transcript, never resurrects a deleted session.
+  Sessions arrive without the source machine's permission grants, and a
+  permission bypass arrives as auto. Dry run unless --apply.
+"""
+
+
 SKILL_MD = '''---
 name: claude-session-teleporter
-description: Find and move sessions between Claude and Codex, across Claude account/org partitions, and between WSL and the Windows desktop app. Use when the user says sessions are "missing", "gone", or "not showing up" after switching orgs or accounts, asks where Claude Code stores sessions, wants to continue a session from their other org, wants a session they started in WSL to show up in the Claude app on Windows (or the reverse), or hits a rate limit on one org and wants their work available in another.
+description: Find and move sessions between Claude and Codex, across Claude account/org partitions, and between WSL and the Windows desktop app. Use when the user says sessions are "missing", "gone", or "not showing up" after switching orgs or accounts, asks where Claude Code stores sessions, wants to continue a session from their other org, wants a session they started in WSL to show up in the Claude app on Windows (or the reverse), wants to zip, back up, export or import sessions or carry them to another machine, or hits a rate limit on one org and wants their work available in another.
 user-invocable: true
 allowed-tools:
   - Bash({allow} *)
@@ -1826,6 +2467,7 @@ allowed-tools:
 | **client** | Claude vs Codex, different transcript formats | `teleport` |
 | **partition** | account/org, same machine, same transcripts | `copy` |
 | **host** | WSL vs Windows - different filesystem, different Claude Code install | `adopt` / `eject` |
+| **machine** | nothing shared - another computer, a backup, a fresh install | `pack` / `unpack` |
 
 Diagnose which axis before running anything. They fail in different ways and
 the fixes do not substitute for each other.
@@ -1898,6 +2540,19 @@ Or on the host axis:
 {run} eject <id> --to wsl:Ubuntu    # the other direction, DRY RUN
 ```
 
+Or across machines - also a way to test a session with the CLI inside WSL:
+
+```bash
+{run} pack --from <partition> --since 4h          # DRY RUN; -s <id> for chosen ones
+{run} pack --from <partition> --since 4h -o work.zip --apply
+{run} unpack work.zip                            # DRY RUN into the signed-in org
+{run} unpack work.zip --host wsl:Ubuntu --apply  # transcripts for the CLI in WSL
+{run} unpack work.zip --cli --map-cwd 'C:\\Users\\me\\GitHub=/home/me/src'  # elsewhere
+```
+
+A pack holds whole conversations; say so before the user sends one anywhere.
+`unpack` places copies: like `eject`, each continues independently of its source.
+
 Selectors - partition: a label, an org-uuid prefix, or `active` / `last-active` /
 `most-quota`. Host: `wsl`, `wsl:<distro>`, `windows`. Session `-s`: an id prefix
 or title substring, repeatable. Label a partition once so the user stops reading
@@ -1941,6 +2596,11 @@ transcript is missing, and refuses cross-account copies without
 `--allow-cross-account`. `adopt` never writes into the distro, and derives the
 desktop uuid from the WSL session id so re-running is idempotent rather than
 duplicating.
+
+`unpack` reads a pack as untrusted: it builds every path from a validated
+manifest, checks every file's sha256, refuses a bad pack before writing
+anything, and strips the source machine's permission grants (a bypass arrives
+as `auto`).
 
 **`eject` and cross-client `teleport` write a second transcript.** The Windows
 session keeps its own. Say this out loud - after eject there are two independent
@@ -2159,6 +2819,18 @@ GOING THE OTHER WAY
   A session already flagged W needs none of this - its transcript never left
   the distro. eject just prints the resume command.
 
+ANOTHER MACHINE
+
+  $ {tool} pack --from work --since 4h -o work.zip --apply
+  $ {tool} unpack work.zip                     DRY RUN, into the signed-in org
+  $ {tool} unpack work.zip --host wsl:Ubuntu   for the CLI inside WSL
+  $ {tool} unpack work.zip --cli               for a CLI with no desktop app
+
+  A pack is one zip: transcripts, the subagent and tool-result files beside
+  them, metadata, and a manifest with a sha256 per file. Paths usually differ
+  on the other side; --map-cwd OLD=NEW rewrites a prefix on every record.
+  It holds whole conversations, so treat it like the code they touched.
+
 WHEN IT LOOKS WRONG
 
   $ {tool} active            three readings of which partition is "active"
@@ -2254,6 +2926,9 @@ examples:
   claude_sessions.py adopt --from wsl:Ubuntu       DRY RUN: make them visible in the app
   claude_sessions.py eject 8aef --to wsl:Ubuntu    hand a Windows session to the WSL CLI
 
+  claude_sessions.py pack --from work --since 4h   DRY RUN: zip the last 4 hours of work
+  claude_sessions.py unpack x.zip --host wsl       DRY RUN: restore them for the CLI in WSL
+
   claude_sessions.py skill --install               teach Claude Code to drive this
 
 selectors:
@@ -2264,6 +2939,7 @@ selectors:
 two independent axes:
   partitions  same machine, same transcripts, different account/org -> copy
   hosts       different filesystem and different Claude Code install -> adopt/eject
+  machines    nothing shared at all -> pack, carry the zip, unpack
 
 note:
   The app caches its session index in memory, so copies do not appear until it
@@ -4060,6 +4736,39 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--to", metavar="HOST", help="destination distro (default: the only one)")
     ep.add_argument("--apply", action="store_true", help="actually write (default is dry run)")
     ep.set_defaults(fn=cmd_eject)
+
+    pk = sub.add_parser(
+        "pack",
+        help="put sessions in one zip, for another machine or WSL (dry run by default)",
+        description="Write sessions from a partition - transcripts, the files beside them, "
+        "metadata and a checksummed manifest - into one zip that `unpack` reads.",
+        epilog=PACK_EPILOG,
+        formatter_class=fmt,
+    )
+    pk.add_argument("--from", "-p", dest="source", metavar="SEL", help="source partition (default: the signed-in one)")
+    pk.add_argument("-s", "--session", action="append", default=[], metavar="SEL", help="id prefix or title substring (repeatable)")
+    pk.add_argument("--since", metavar="AGE", help="only sessions active within AGE, e.g. 90m, 4h, 2d")
+    pk.add_argument("--include-archived", action="store_true", help="also pack archived sessions")
+    pk.add_argument("-o", "--output", metavar="FILE", help="zip to write (default: claude-sessions-<partition>-<time>.zip)")
+    pk.add_argument("--apply", action="store_true", help="actually write the zip (default is dry run)")
+    pk.set_defaults(fn=cmd_pack)
+
+    up = sub.add_parser(
+        "unpack",
+        help="restore sessions from a pack (dry run by default)",
+        description="Place the sessions in a pack where Claude Code finds them: this machine's "
+        "app and CLI, this machine's CLI only, or the CLI inside a WSL distro.",
+        epilog=UNPACK_EPILOG,
+        formatter_class=fmt,
+    )
+    up.add_argument("pack", metavar="FILE", help="a zip written by `pack`")
+    up.add_argument("--to", metavar="SEL", help="destination partition (default: the signed-in one)")
+    up.add_argument("--host", metavar="HOST", help="wsl or wsl:<distro> for the CLI inside WSL (default: this machine)")
+    up.add_argument("--cli", action="store_true", help="transcripts only, no desktop metadata")
+    up.add_argument("--map-cwd", action="append", default=[], metavar="OLD=NEW", help="rewrite a path prefix (repeatable)")
+    up.add_argument("-s", "--session", action="append", default=[], metavar="SEL", help="id prefix or title substring (repeatable)")
+    up.add_argument("--apply", action="store_true", help="actually write (default is dry run)")
+    up.set_defaults(fn=cmd_unpack)
 
     tp = sub.add_parser(
         "teleport", help="fork conversation history between Claude and Codex",

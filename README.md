@@ -468,6 +468,33 @@ has to be reachable from the distro (`C:\you\repo` is visible there as
 with the `cwd` rewritten, and prints the `wsl … claude --resume` line. The
 Windows session keeps its own. Resume in one place or the other, never both.
 
+### Another machine, or a backup
+
+```bash
+# zip the last four hours of work in one org (dry run, then for real)
+claude-sessions pack --from work --since 4h
+claude-sessions pack --from work --since 4h -o work.zip --apply
+
+# on the other side: into the signed-in org of the desktop app
+claude-sessions unpack work.zip --apply
+# or for the CLI inside WSL - also a quick way to try a session there
+claude-sessions unpack work.zip --host wsl:Ubuntu --apply
+# or for a CLI on a machine that keeps its code somewhere else
+claude-sessions unpack work.zip --cli --map-cwd 'C:\Users\me\GitHub=/home/me/src' --apply
+```
+
+A pack is one zip: each transcript, the directory Claude Code keeps beside it
+(subagent transcripts, persisted tool results), its desktop metadata, and a
+manifest with a sha256 for every file. It holds whole conversations, so treat
+it like the code and secrets those sessions touched.
+
+`unpack` treats a pack as untrusted input. It never extracts by archive name:
+paths are built from a validated manifest, each file is checked against its
+checksum, and a pack with one bad entry is refused before anything is written.
+Sessions arrive without the source machine's permission grants, connectors are
+remapped by name as in `copy`, and every unpacked session is an independent
+copy of the one it came from.
+
 ### Let Claude drive it
 
 ```bash
@@ -518,6 +545,10 @@ UUID from the WSL session id so re-running is idempotent, and resets
 pre-authorised to skip tool approval.
 
 `eject` is the exception, and says so loudly: it writes a second transcript.
+
+`pack` only reads, and never overwrites the zip it writes. `unpack` never
+overwrites a session or a transcript, honours tombstones, refuses a tampered or
+malformed pack before writing, and strips permission grants on the way in.
 
 Imports are recorded in `~/.claude/session-copy-ledger.json` so that copied
 sessions are excluded when building the destination's connector map. That
