@@ -145,6 +145,53 @@ text excerpts and never changes a source transcript or selection.
 
 > `test_ui_peek_reads_turns_without_writing`
 
+### S16 - `pack` only reads, and never overwrites its own output
+
+Packing a session changes nothing about it: not its metadata, transcript or
+sidecar files. The zip is opened with exclusive create, so an existing file of
+that name is refused. Like every write command, both `pack` and `unpack` are
+dry runs without `--apply`.
+
+> `test_pack_leaves_the_source_untouched`, `test_pack_never_overwrites_its_output`,
+> `test_pack_and_unpack_dry_runs_write_nothing`
+
+### S17 - `unpack` never overwrites, never resurrects, and repeats as a no-op
+
+Transcripts, sidecar files and metadata are all written with exclusive create.
+A different transcript already at the destination refuses the whole session; an
+identical one is reused. A session whose metadata is already there but whose
+files are gone gets its files back, and its metadata is left alone - the
+restore-from-backup case. A `deleted_<id>` tombstone blocks the session, so a
+session deleted in the app is not restored. A session that fails mid-write has
+only the files this run created for it removed. `--to` with a destination that
+gets no metadata is an error, not ignored.
+
+> `test_unpack_never_overwrites_a_different_transcript`, `test_unpack_twice_is_a_noop`,
+> `test_tombstone_blocks_unpack`, `test_unpack_uses_exclusive_create`,
+> `test_unpack_restores_files_of_a_session_the_app_still_lists`,
+> `test_to_is_refused_where_no_metadata_is_written`
+
+### S18 - A pack is untrusted input
+
+Nothing is extracted by its archive name. Every destination path is built from
+manifest fields that must look like names Claude Code writes (no separators,
+no `..`, no drive), every file is checked against the manifest's sha256, and a
+manifest with one unsafe entry refuses the whole pack before any write. A file
+whose bytes do not match is not unpacked. A zip without a manifest is not a pack.
+
+> `test_hostile_pack_is_refused_before_any_write`, `test_tampered_file_is_not_unpacked`,
+> `test_a_zip_without_a_manifest_is_not_a_pack`, `test_hostile_pack_control_unpacks_when_untouched`,
+> `test_malformed_connectors_in_a_pack_do_not_crash`
+
+### S19 - Unpacked sessions arrive without the source machine's grants
+
+`alwaysAllowedReasons` and `sessionPermissionUpdates` are emptied, and a
+`permissionMode` other than `default`, `plan` or `auto` becomes `auto` - the
+same rule as S10. WSL and ssh placement fields are dropped: an unpacked session
+runs where it was unpacked.
+
+> `test_unpack_into_desktop_ports_connectors_and_strips_grants`
+
 ---
 
 ## Format
@@ -229,6 +276,19 @@ and must still resolve through `sshRemoteTranscriptPath` - otherwise `copy`
 would refuse to move it between orgs under S6.
 
 > `test_wsl_transcript_resolves_without_mirror`
+
+### F10 - A transcript has a sidecar directory, and moving hosts rewrites every record in it
+
+`<project>/<cliSessionId>/` holds subagent transcripts, persisted tool results
+and a custom title. `pack` carries it with the transcript. Unpacking onto a host
+that spells paths differently rewrites `cwd` on every `.jsonl` record - each
+record mapped on its own, so a moved session keeps its history - and places the
+session in the directory the new cwd encodes to. Other files are history and are
+copied byte for byte; on the same host everything is.
+
+> `test_pack_holds_transcript_sidecars_metadata_and_checksums`,
+> `test_unpack_to_wsl_rewrites_cwd_and_places_where_the_cli_looks`,
+> `test_moved_session_keeps_each_records_own_cwd`, `test_cli_unpack_elsewhere_is_byte_identical`
 
 ---
 

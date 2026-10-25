@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.5.0 — 2026-10-25
+
+### Added
+
+- `pack` writes chosen sessions into one zip: transcripts, the subagent and
+  tool-result files beside them, desktop metadata, and a manifest with a sha256
+  per file. Select with `--from`, `-s`, `--since 4h` and `--include-archived`.
+- `unpack` restores a pack into this machine's app (connectors remapped by
+  name), this machine's CLI only (`--cli`), or the CLI inside WSL
+  (`--host wsl:Ubuntu`). `--map-cwd OLD=NEW` rewrites path prefixes for a
+  machine that keeps code elsewhere. A pack is treated as untrusted input; see
+  INVARIANTS.md S16-S19 and F10.
+
+### Changed
+
+- `eject` now writes the records whose `cwd` it rewrites compactly, the way
+  Claude Code writes them.
+
 ## 1.4.0 — 2026-10-21
 
 ### Added
