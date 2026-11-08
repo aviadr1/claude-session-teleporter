@@ -42,6 +42,31 @@ destination between the plan and the write, it is left alone and reported.
 
 > `test_never_overwrites_existing_session`, `test_exclusive_create_is_used`
 
+**The one exception: `copy --refresh`.** A copy goes stale when work continues
+in the source org. Refresh replaces the copy's metadata, and only as a
+fast-forward. Every one of these must hold, or the file is left byte-for-byte
+alone:
+
+- the ledger records a copy of this session between these two orgs, in either
+  direction. A session this tool never copied is not its to replace;
+- both files name the same `cliSessionId`, and both carry `lastAssistantUuid`;
+- in the shared transcript, the copy's `lastAssistantUuid` is a strict ancestor
+  of the source's (following `logicalParentUuid` across compaction). A copy that
+  continued on its own, or is further along, is refused;
+- the file is unchanged since the plan was made, checked again just before the
+  swap.
+
+The displaced bytes are written to `~/.claude/session-copy-backups/<org>/` with
+exclusive create before an atomic `os.replace`, so the previous version is never
+lost. The copy's own `isArchived` is kept, and `lastFocusedAt` takes the later of
+the two.
+
+> `test_dry_run_refresh_writes_nothing`, `test_without_flag_existing_copy_is_untouched_and_hinted`,
+> `test_refresh_keeps_the_previous_version`, `test_diverged_copy_is_left_alone`,
+> `test_copy_ahead_of_source_is_left_alone`, `test_session_the_tool_never_copied_is_left_alone`,
+> `test_unmarked_copy_cannot_be_compared`, `test_replace_refuses_a_file_that_changed`,
+> `test_refresh_writes_are_exclusive_create`, `test_refresh_keeps_archive_state_of_the_copy`
+
 ### S3 - A deleted session is never resurrected
 
 A `deleted_<id>` tombstone in the destination means the user deleted that

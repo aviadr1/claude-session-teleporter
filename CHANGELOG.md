@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `copy --refresh` brings earlier copies up to date when work continued in the
+  source org. Without it, a stale copy is skipped as "already there" and the
+  app keeps showing the old turn count, wrap-up and PR links. It is a
+  fast-forward only: the ledger must link the session between the two orgs, and
+  the shared transcript must prove the copy is strictly behind the source.
+  Diverged, newer or uncomparable copies are refused. The old file is backed up
+  under `~/.claude/session-copy-backups/` before an atomic replace. See
+  INVARIANTS.md S2.
+- `copy --since 4h` limits a copy to recently active sessions, like `pack`.
+
 ## 1.5.0 — 2026-10-25
 
 ### Added

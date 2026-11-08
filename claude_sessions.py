@@ -58,7 +58,9 @@ Commands:
 Run `--help` for examples, or `guide` for the long version.
 
 Safety invariants for `copy`:
-  * never overwrites an existing session in the destination (no --force exists)
+  * never overwrites an existing session in the destination (no --force exists);
+    the one exception is --refresh, a fast-forward of a copy this tool made,
+    proven behind the source from the transcript, with the old file backed up
   * never writes over a `deleted_<id>` tombstone (a session you deleted there)
   * never modifies or removes anything in the source partition
   * never touches transcripts - they are shared, not duplicated
@@ -1068,6 +1070,120 @@ def port_session(sess: Session, dst: Partition, keep_error: bool, known: dict[st
     return _strip_volatile(data, keep_error, notes), notes
 
 
+# Desktop-side UI state that belongs to the copy being refreshed, not to the
+# conversation. Everything else comes from the source, which is further along.
+REFRESH_KEEP_FIELDS = ("isArchived",)
+REFRESH_MAX_FIELDS = ("lastFocusedAt",)
+
+
+def transcript_parents(path: Path) -> dict[str, str | None]:
+    """
+    uuid -> parent uuid for every record in a transcript.
+
+    A compaction boundary starts a new chain with parentUuid null and points
+    back through logicalParentUuid, so that is followed when parentUuid is
+    missing - otherwise a compacted session would look unrelated to its past.
+    """
+    parents: dict[str, str | None] = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                rec = _loads(line)
+                if rec and isinstance(rec.get("uuid"), str):
+                    parents[rec["uuid"]] = rec.get("parentUuid") or rec.get("logicalParentUuid")
+    except OSError:
+        pass
+    return parents
+
+
+def is_ancestor(parents: dict[str, str | None], older: str, newer: str) -> bool:
+    """True when `older` is `newer` or lies on its parent chain."""
+    seen: set[str] = set()
+    node: str | None = newer
+    while node and node not in seen:
+        if node == older:
+            return True
+        seen.add(node)
+        node = parents.get(node)
+    return False
+
+
+def refresh_verdict(src: Session, dst: Session | None, linked: bool) -> tuple[str, str]:
+    """
+    Decide whether a copy that already exists may be brought up to date.
+
+    The only overwrite this tool ever makes is a fast-forward: the copy in the
+    destination must be strictly behind the source on the same conversation,
+    proven from the shared transcript. Anything that cannot be proven is refused.
+    Returns (status, detail).
+    """
+    if dst is None:
+        return SKIP_EXISTS, "unreadable in destination"
+    if not linked:
+        return SKIP_UNLINKED, "the ledger has no copy between these orgs"
+    if src.cli_session_id != dst.cli_session_id:
+        return SKIP_UNPROVABLE, "different conversations under one id"
+    if not src.transcript:
+        return SKIP_UNPROVABLE, "transcript missing"
+    newer, older = src.data.get("lastAssistantUuid"), dst.data.get("lastAssistantUuid")
+    if not newer or not older:
+        return SKIP_UNPROVABLE, "no last-message marker to compare"
+    if newer == older:
+        return SKIP_CURRENT, ""
+    parents = transcript_parents(src.transcript)
+    if newer not in parents or older not in parents:
+        return SKIP_UNPROVABLE, "last message not found in the transcript"
+    if is_ancestor(parents, older, newer):
+        return REFRESH, f"turns {dst.data.get('completedTurns', '?')}->{src.data.get('completedTurns', '?')}"
+    if is_ancestor(parents, newer, older):
+        return SKIP_DEST_AHEAD, "the copy here is further along"
+    return SKIP_DIVERGED, "both sides continued the conversation"
+
+
+def refreshed_payload(src: Session, dst: Session, dst_part: Partition, keep_error: bool,
+                      known: dict[str, str]) -> tuple[dict, list[str]]:
+    """The source, ported into `dst_part`, keeping the copy's own UI state."""
+    data, notes = port_session(src, dst_part, keep_error, known)
+    for f in REFRESH_KEEP_FIELDS:
+        if f in dst.data:
+            data[f] = dst.data[f]
+        else:
+            data.pop(f, None)
+    for f in REFRESH_MAX_FIELDS:
+        vals = [v for v in (src.data.get(f), dst.data.get(f)) if isinstance(v, (int, float))]
+        if vals:
+            data[f] = max(vals)
+    return data, notes
+
+
+def replace_session_file(target: Path, expected: bytes, payload: dict, backup_dir: Path) -> Path:
+    """
+    Swap in a refreshed session file without ever losing the old one.
+
+    The displaced bytes are saved to `backup_dir` first (exclusive create), the
+    new content goes to a temp file beside the target (exclusive create), and
+    os.replace makes the swap atomic. If the file changed since it was planned
+    against - the app writes these too - nothing is replaced.
+    """
+    if target.read_bytes() != expected:
+        raise FileExistsError("changed since the plan was made")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{target.stem}.{int(time.time() * 1000)}.json"
+    with open(backup, "xb") as fh:
+        fh.write(expected)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        if target.read_bytes() != expected:
+            raise FileExistsError("changed while writing")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return backup
+
+
 def _strip_volatile(data: dict, keep_error: bool, notes: list[str]) -> dict:
     for f in VOLATILE_FIELDS:
         if data.pop(f, None) is not None:
@@ -1334,6 +1450,13 @@ SKIP_EXISTS = "skip: already there"
 SKIP_TOMB = "skip: deleted there"
 SKIP_ARCHIVED = "skip: archived"
 SKIP_NO_TRANSCRIPT = "skip: no transcript"
+REFRESH = "REFRESH"
+SKIP_CURRENT = "skip: up to date"
+SKIP_DIVERGED = "skip: diverged here"
+SKIP_DEST_AHEAD = "skip: newer here"
+SKIP_UNLINKED = "skip: not a tool copy"
+SKIP_UNPROVABLE = "skip: can't compare"
+WRITES = (COPY, REFRESH)
 
 
 def cmd_copy(args) -> int:
@@ -1362,21 +1485,41 @@ def cmd_copy(args) -> int:
 
     known = connector_names(parts)
     pool = resolve_sessions(src, args.session) if args.session else src.sessions
-    plan = []
+    since = getattr(args, "since", None)
+    if since:
+        cutoff = int(time.time() * 1000) - parse_since(since)
+        older = sum(1 for s in pool if s.last_activity < cutoff)
+        pool = [s for s in pool if s.last_activity >= cutoff]
+        print(f"--since {since}: {len(pool)} session(s) active since {ts(cutoff)}, {older} older left out")
+    refresh = getattr(args, "refresh", False)
+    in_dst = {s.uuid: s for s in dst.sessions}
+    linked = {
+        e.get("uuid")
+        for e in load_ledger()
+        if {e.get("src"), e.get("dest")} == {src.org, dst.org}
+    }
+    plan = []  # (session, status, port notes, detail)
     for s in pool:
         if s.archived and not args.include_archived:
-            plan.append((s, SKIP_ARCHIVED, []))
+            plan.append((s, SKIP_ARCHIVED, [], ""))
         elif (dst.path / f"{s.session_id}.json").exists():
-            plan.append((s, SKIP_EXISTS, []))
+            if not refresh:
+                plan.append((s, SKIP_EXISTS, [], ""))
+                continue
+            st, detail = refresh_verdict(s, in_dst.get(s.uuid), s.uuid in linked)
+            notes = []
+            if st == REFRESH:
+                _, notes = refreshed_payload(s, in_dst[s.uuid], dst, args.keep_error, known)
+            plan.append((s, st, notes, detail))
         elif s.uuid in dst.tombstones:
-            plan.append((s, SKIP_TOMB, []))
+            plan.append((s, SKIP_TOMB, [], ""))
         elif not s.transcript:
-            plan.append((s, SKIP_NO_TRANSCRIPT, []))
+            plan.append((s, SKIP_NO_TRANSCRIPT, [], ""))
         else:
             _, notes = port_session(s, dst, args.keep_error, known)
-            plan.append((s, COPY, notes))
-    plan.sort(key=lambda x: (x[1] != COPY, -x[0].last_activity))
-    todo = [(s, n) for s, st, n in plan if st == COPY]
+            plan.append((s, COPY, notes, ""))
+    plan.sort(key=lambda x: (x[1] not in WRITES, x[1] != COPY, -x[0].last_activity))
+    todo = [(s, st, n) for s, st, n, _ in plan if st in WRITES]
 
     # ---- direction diagram ----
     left, right = partition_card(src, "SOURCE"), partition_card(dst, "TARGET")
@@ -1400,7 +1543,7 @@ def cmd_copy(args) -> int:
             f"{dst.name} has less quota left ({dst.headroom}%) than {src.name} ({src.headroom}%) - "
             f"this moves work toward the more exhausted plan."
         )
-    if any(s.is_remote for s, _ in todo):
+    if any(s.is_remote for s, _, _ in todo):
         notes.append("some sessions are ssh/remote; they resume only if that host is reachable.")
     for name, tally in dst.contested_connectors.items():
         winner, count = max(tally.items(), key=lambda kv: kv[1])
@@ -1417,22 +1560,28 @@ def cmd_copy(args) -> int:
 
     # ---- table ----
     rows = []
-    for s, st, ns in plan:
+    for s, st, ns, detail in plan:
         rows.append(
             [
-                G.check if st == COPY else G.cross,
-                st,
+                G.check if st in WRITES else G.cross,
+                f"{st} ({detail})" if detail and st == REFRESH else st,
                 s.uuid[:8],
                 ts(s.last_activity),
                 trunc(s.title, 44),
                 trunc(s.branch or Path(s.cwd).name, 28),
-                str(len(ns)) if st == COPY else "",
+                str(len(ns)) if st in WRITES else "",
             ]
         )
     print(table([" ", "ACTION", "ID", "LAST ACTIVITY", "TITLE", "BRANCH/DIR", "FIX"], rows))
 
+    refused = [(s, st, d) for s, st, _, d in plan if st in (SKIP_DIVERGED, SKIP_DEST_AHEAD, SKIP_UNLINKED, SKIP_UNPROVABLE)]
+    if refused:
+        print("\nnot refreshed:")
+        for s, st, d in refused:
+            print(f"  {s.uuid[:8]}  {st}{' - ' + d if d else ''}")
+
     fixes: dict[str, int] = {}
-    for _, st, ns in plan:
+    for _, st, ns, _ in plan:
         for n in ns:
             fixes[n] = fixes.get(n, 0) + 1
     if fixes:
@@ -1441,41 +1590,64 @@ def cmd_copy(args) -> int:
             print(f"  {c:>2}x  {n}")
 
     counts: dict[str, int] = {}
-    for _, st, _ in plan:
+    for _, st, _, _ in plan:
         counts[st] = counts.get(st, 0) + 1
     print("\n" + "   ".join(f"{v} {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])))
     print("transcripts are shared on disk - none are copied or duplicated.")
+    stale = counts.get(SKIP_EXISTS, 0)
+    if stale and not refresh:
+        print(f"{stale} already there; --refresh brings any that are behind the source up to date.")
 
+    n_copy = sum(1 for _, st, _ in todo if st == COPY)
+    n_refresh = len(todo) - n_copy
+    what = f"copy {n_copy}" + (f" and refresh {n_refresh}" if refresh else "")
     if not args.apply:
-        print(f"\nDRY RUN. Nothing written. Re-run with --apply to copy {len(todo)} session(s).")
+        print(f"\nDRY RUN. Nothing written. Re-run with --apply to {what} session(s).")
         return 0
     if not todo:
         print("\nNothing to do.")
         return 0
 
     dst.path.mkdir(parents=True, exist_ok=True)
-    written, ledger = 0, []
-    for s, _ in todo:
+    backup_dir = LEDGER_PATH.parent / "session-copy-backups" / dst.org
+    copied, refreshed, ledger = 0, 0, []
+    for s, st, _ in todo:
         target = dst.path / f"{s.session_id}.json"
-        payload, _ = port_session(s, dst, args.keep_error, known)
+        stamp = {"uuid": s.uuid, "src": src.org, "dest": dst.org, "at": int(time.time() * 1000)}
         try:
-            # exclusive create: cannot clobber an existing session, ever
-            with open(target, "x", encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=2)
-            written += 1
-            ledger.append(
-                {"uuid": s.uuid, "src": src.org, "dest": dst.org, "at": int(time.time() * 1000)}
-            )
-            print(f"{G.check} {s.uuid[:8]}  {trunc(s.title, 60)}")
-        except FileExistsError:
-            print(f"{G.cross} {s.uuid[:8]}  appeared in destination mid-run, left alone")
-        except OSError as exc:
+            if st == COPY:
+                payload, _ = port_session(s, dst, args.keep_error, known)
+                # exclusive create: a plain copy can never clobber an existing session
+                with open(target, "x", encoding="utf-8") as fh:
+                    json.dump(payload, fh, indent=2)
+                copied += 1
+                print(f"{G.check} {s.uuid[:8]}  {trunc(s.title, 60)}")
+            else:
+                old = in_dst[s.uuid]
+                expected = target.read_bytes()
+                if json.loads(expected) != old.data:
+                    raise FileExistsError("changed since the plan was made")
+                payload, _ = refreshed_payload(s, old, dst, args.keep_error, known)
+                backup = replace_session_file(target, expected, payload, backup_dir)
+                refreshed += 1
+                stamp["refresh"] = True
+                print(f"{G.check} {s.uuid[:8]}  refreshed  {trunc(s.title, 50)}")
+                print(f"    previous version saved to {backup}")
+            ledger.append(stamp)
+        except FileExistsError as exc:
+            why = "appeared in destination mid-run" if st == COPY else str(exc)
+            print(f"{G.cross} {s.uuid[:8]}  {why}, left alone")
+        except (OSError, ValueError) as exc:
             print(f"{G.cross} {s.uuid[:8]}  {exc}")
     if ledger:
         record_copies(ledger)
-    print(f"\nCopied {written} session(s) into {dst.name} ({dst.org}).")
+    done = f"Copied {copied}" + (f" and refreshed {refreshed}" if refresh else "")
+    print(f"\n{done} session(s) into {dst.name} ({dst.org}).")
     print("The app caches its session list in memory. Switch accounts in the app to")
     print("force a reload - faster than restarting it, and it works just as well.")
+    if refreshed:
+        print(f"{G.warn} Reload BEFORE opening a refreshed session: until then the app holds the old")
+        print("  version in memory and may write it back. If it does, run the same --refresh again.")
     return 0
 
 
@@ -2529,7 +2701,13 @@ Then, on the partition axis:
 {run} sessions -p <partition>       # what is over there
 {run} copy --from <partition>       # DRY RUN
 {run} copy --from <partition> --apply
+{run} copy --from <partition> --since 4h --refresh   # DRY RUN: recent work, and stale earlier copies
 ```
+
+A copy made earlier goes stale when work continues in the source: the shared
+transcript is current, but the app shows the old turn count, report and PRs.
+`--refresh` updates such copies, only when the transcript proves the copy is
+strictly behind the source; it refuses a copy that continued on its own.
 
 Or on the host axis:
 
@@ -2587,6 +2765,7 @@ Resume the printed ID with the destination CLI or refresh the desktop app.
 State these when the user asks whether it is safe. All three commands:
 
 - Never overwrite an existing session (exclusive create; there is no `--force`).
+  The one exception is `copy --refresh`, below.
 - Never resurrect something deleted in the destination (`deleted_<id>` tombstones).
 - Never modify or remove anything in the source.
 - Dry run by default.
@@ -2764,7 +2943,8 @@ WHY NOT JUST cp
 WHAT CANNOT GO WRONG
 
   Never overwrites an existing session - exclusive create, and there is no
-  --force flag by design. Never resurrects something you deleted in the
+  --force flag by design (--refresh only fast-forwards a stale copy this tool
+  made, and saves the old file first). Never resurrects something you deleted in the
   destination. Never modifies the source. Never duplicates transcripts.
   Refuses sessions with no transcript. Dry run unless you pass --apply.
 
@@ -2962,6 +3142,15 @@ safety:
   deliberately no --force flag. Never resurrects a session deleted in the
   destination. Never modifies the source. Never duplicates transcripts.
   Refuses sessions whose transcript is missing. Dry run unless --apply.
+
+refresh:
+  A session copied earlier goes stale when work continues in the source.
+  --refresh brings such a copy up to date, and only as a fast-forward: the
+  ledger must show this tool copied it between these two orgs (either way),
+  and the shared transcript must prove the copy is strictly behind the source.
+  A copy that continued on its own, or cannot be compared, is left alone.
+  Archive state set in the destination is kept. The displaced file is saved
+  under ~/.claude/session-copy-backups/ before an atomic replace.
 
 port fixes:
   Metadata is not org-portable as-is: the same MCP connector has a different
@@ -4704,6 +4893,9 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--include-archived", action="store_true", help="also copy archived sessions")
     cp.add_argument("--keep-error", action="store_true", help="preserve previous crash state")
     cp.add_argument("--allow-cross-account", action="store_true", help="permit copying between accounts")
+    cp.add_argument("--since", metavar="AGE", help="only sessions active within AGE, e.g. 90m, 4h, 2d")
+    cp.add_argument("--refresh", action="store_true",
+                    help="bring earlier copies up to date when the source has moved on (fast-forward only)")
     cp.add_argument("--apply", action="store_true", help="actually write (default is dry run)")
     cp.set_defaults(fn=cmd_copy)
 
