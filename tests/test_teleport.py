@@ -31,7 +31,9 @@ def test_teleport_dry_run_apply_and_repeat(journey, capsys):
     assert not dest.exists()
     assert 'DRY RUN' in capsys.readouterr().out
     assert cs.main([*argv, '--apply']) == 0
-    files = list(dest.rglob('*.jsonl'))
+    # the tool writes through extended paths; read back the same way, since the
+    # destination can pass Windows' 260-character limit inside tmp_path
+    files = list(cs.native_path(dest).rglob('*.jsonl'))
     assert len(files) == 1
     imported = cs.read_portable_session(files[0])
     assert [(m.role, m.text) for m in imported.messages][-2:] == [('user', PROMPT), ('assistant', ANSWER)]
@@ -120,7 +122,7 @@ def test_desktop_metadata_uses_destination_and_resets_permissions(world, tmp_pat
     assert metadata['alwaysAllowedReasons']==[]
     assert metadata['sessionPermissionUpdates']==[]
     assert 'wslConfig' not in metadata
-    assert (world.projects / cs.encode_cwd(str(tmp_path)) / (metadata['cliSessionId']+'.jsonl')).exists()
+    assert cs.native_path(world.projects / cs.encode_cwd(str(tmp_path)) / (metadata['cliSessionId']+'.jsonl')).exists()
 
 
 def test_codex_fork_with_inherited_parent_header(tmp_path):
@@ -154,7 +156,7 @@ def test_desktop_tombstone_blocks_import(world, tmp_path):
     metadata = next(part.glob('local_*.json'))
     world.add_tombstone(part, metadata.stem.removeprefix('local_'))
     metadata.unlink()
-    imported = next(world.projects.rglob('*.jsonl')); imported.unlink()
+    imported = next(cs.native_path(world.projects).rglob('*.jsonl')); imported.unlink()
     snapshot = world.snapshot(part, world.projects)
     with pytest.raises(SystemExit):
         cs.main(args)
