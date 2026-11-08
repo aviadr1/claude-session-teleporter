@@ -212,6 +212,12 @@ does, so the directory names where the session *ended up*. Records written
 before the move still carry the old `cwd`, so re-encoding any `cwd` read out of
 a transcript can produce a directory that does not exist.
 
+It also happens the other way round. A desktop session that moves into a
+worktree after it started, or is forked from a session in another worktree,
+keeps writing its transcript where it was launched: the repository root or a
+sibling `.claude/worktrees/<name>`. Then no record names the directory at all;
+every `cwd` points at the worktree the session moved into.
+
 Anything that needs a transcript's path must use `CliSession.project_dir`, taken
 verbatim from the filesystem.
 

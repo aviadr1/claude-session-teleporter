@@ -7,8 +7,10 @@ demo cannot claim output the tool no longer prints.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
-def demo(tmp_path: Path):
-    home = tmp_path / "home"
+def demo():
+    # Not tmp_path: pytest's per-test directory plus account/org/session ids
+    # runs past Windows' 260-character MAX_PATH when long paths are disabled,
+    # which is the default. A short mkdtemp keeps the store well under it.
+    base = Path(tempfile.mkdtemp(prefix="csd-"))
+    home = base / "home"
     subprocess.run(
         [sys.executable, str(ROOT / "docs" / "demo_fixture.py"), str(home)],
         check=True,
@@ -29,6 +35,9 @@ def demo(tmp_path: Path):
         "HOME": str(home),
         "USERPROFILE": str(home),
         "APPDATA": str(home / "AppData" / "Roaming"),
+        # the Microsoft Store app keeps its store under LOCALAPPDATA; leaving
+        # the real one in place lets the tool find a real store instead
+        "LOCALAPPDATA": str(home / "AppData" / "Local"),
         "PYTHONIOENCODING": "utf-8",
     }
     env.pop("CLAUDE_SESSIONS_ROOT", None)
@@ -44,7 +53,8 @@ def demo(tmp_path: Path):
         )
         return result.stdout
 
-    return run
+    yield run
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def test_demo_shows_two_orgs_one_out_of_quota(demo) -> None:

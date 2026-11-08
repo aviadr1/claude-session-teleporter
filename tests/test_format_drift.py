@@ -64,14 +64,37 @@ needs_transcripts = pytest.mark.skipif(not _real_transcripts(), reason="no real 
 # --------------------------------------------------------------------------
 
 
+def _same_repository(cwd: str, project_dir: str) -> bool:
+    """`project_dir` encodes the root of cwd's repository, or one of its worktrees."""
+    root = cwd
+    for sep in ("\\.claude\\worktrees\\", "/.claude/worktrees/"):
+        root = root.split(sep)[0]
+    enc = cs.encode_cwd(root)
+    return project_dir == enc or project_dir.startswith(enc + "--claude-worktrees-")
+
+
+def test_same_repository_rule():
+    repo = r"C:\Users\a\GitHub\api"
+    assert _same_repository(repo + r"\.claude\worktrees\b\src", "C--Users-a-GitHub-api")
+    assert _same_repository(repo + r"\.claude\worktrees\b", "C--Users-a-GitHub-api--claude-worktrees-a")
+    assert _same_repository("/home/a/api/.claude/worktrees/b", "-home-a-api--claude-worktrees-a")
+    # a different repository whose name merely starts the same is not explained
+    assert not _same_repository(repo + r"\.claude\worktrees\b", "C--Users-a-GitHub-api-v2")
+    assert not _same_repository(repo, "C--Users-a-GitHub-web")
+
+
 @needs_transcripts
 def test_encode_cwd_matches_real_store():
     """
     F1 + F2 together, against reality.
 
-    Every transcript either sits in the directory its cwd encodes to, or in a
-    directory that matches no cwd at all - the app's `ssh-<id>` mirrors. A third
-    case would mean the encoding rule has changed.
+    Every transcript sits in one of three places: the directory its cwd encodes
+    to; the app's `ssh-<id>` mirror of a remote session; or another checkout of
+    the same repository - its root or a sibling `.claude/worktrees/<name>`. The
+    last happens when a desktop session moves into a worktree after it started,
+    or is forked from a session in another worktree: the transcript stays where
+    the session was launched, and no record names that directory. Anything else
+    would mean the encoding rule has changed.
     """
     unexplained = []
     for host, path in _real_transcripts():
@@ -82,6 +105,8 @@ def test_encode_cwd_matches_real_store():
             continue
         if c.project_dir.startswith("ssh-"):
             continue  # a mirror of a remote session, named by session id
+        if _same_repository(c.cwd, c.project_dir):
+            continue
         unexplained.append((str(path), c.cwd, c.project_dir))
 
     assert not unexplained, (
