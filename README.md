@@ -426,7 +426,17 @@ claude-sessions copy --from work
 
 # just one session, then actually do it
 claude-sessions copy --from work -s 5651c527 --apply
+
+# only what was active in the last 4 hours, and bring earlier copies up to date
+claude-sessions copy --from work --since 4h --refresh
 ```
+
+A session you copied earlier goes stale if you keep working on it in the source
+org: the conversation is shared, but the app shows the old turn count, summary
+and PR links. `--refresh` updates those copies as a fast-forward only. The
+ledger must show the tool made the copy, and the shared transcript must prove the
+copy is strictly behind the source. A copy you continued on its own is left
+alone. The replaced file is saved under `~/.claude/session-copy-backups/` first.
 
 `copy` prints a direction diagram, the per-session plan, and the port fixes it
 would apply, then stops. Nothing is written without `--apply`.
@@ -528,7 +538,8 @@ proves each one.
 `copy` is built so that a mistake cannot cost you a session:
 
 - **Never overwrites.** Uses exclusive file creation; there is deliberately no
-  `--force` flag.
+  `--force` flag. The one exception is `--refresh`, which fast-forwards a stale
+  copy the tool made, proven from the transcript, after saving the old file.
 - **Never resurrects a deletion.** Skips any session with a `deleted_<id>`
   tombstone in the destination.
 - **Never touches the source.** Copy only; the source partition is opened
