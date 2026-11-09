@@ -1076,36 +1076,56 @@ REFRESH_KEEP_FIELDS = ("isArchived",)
 REFRESH_MAX_FIELDS = ("lastFocusedAt",)
 
 
-def transcript_parents(path: Path) -> dict[str, str | None]:
+def transcript_parents(path: Path) -> dict[str, list[str]]:
     """
-    uuid -> parent uuid for every record in a transcript.
+    uuid -> the records it continues from, for every record in a transcript.
 
-    A compaction boundary starts a new chain with parentUuid null and points
-    back through logicalParentUuid, so that is followed when parentUuid is
-    missing - otherwise a compacted session would look unrelated to its past.
+    Usually that is just parentUuid. A compaction boundary starts a new chain
+    with parentUuid null; it points back through logicalParentUuid, and its
+    compactMetadata.preservedSegment names the pre-compaction messages it kept
+    (head, anchor, tail). Claude Code can leave logicalParentUuid dangling - a
+    uuid written nowhere in the file - so the segment is what actually links a
+    compacted session to its past.
     """
-    parents: dict[str, str | None] = {}
+    parents: dict[str, list[str]] = {}
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 rec = _loads(line)
-                if rec and isinstance(rec.get("uuid"), str):
-                    parents[rec["uuid"]] = rec.get("parentUuid") or rec.get("logicalParentUuid")
+                if not rec or not isinstance(rec.get("uuid"), str):
+                    continue
+                links = [rec.get("parentUuid"), rec.get("logicalParentUuid")]
+                if rec.get("subtype") == "compact_boundary":
+                    seg = (rec.get("compactMetadata") or {}).get("preservedSegment") or {}
+                    if isinstance(seg, dict):
+                        links += [seg.get("tailUuid"), seg.get("anchorUuid"), seg.get("headUuid")]
+                parents[rec["uuid"]] = [u for u in links if isinstance(u, str) and u]
     except OSError:
         pass
     return parents
 
 
-def is_ancestor(parents: dict[str, str | None], older: str, newer: str) -> bool:
-    """True when `older` is `newer` or lies on its parent chain."""
+def is_ancestor(parents: dict[str, list[str]], older: str, newer: str) -> bool | None:
+    """
+    True when `older` is `newer` or lies on its history; False when the whole
+    history was walked without meeting it; None when the walk hit a link to a
+    record that is not in the transcript, so the answer cannot be proven.
+    """
     seen: set[str] = set()
-    node: str | None = newer
-    while node and node not in seen:
+    stack = [newer]
+    broken = False
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
         if node == older:
             return True
         seen.add(node)
-        node = parents.get(node)
-    return False
+        if node not in parents:
+            broken = True
+            continue
+        stack.extend(parents[node])
+    return None if broken else False
 
 
 def refresh_verdict(src: Session, dst: Session | None, linked: bool) -> tuple[str, str]:
@@ -1133,10 +1153,15 @@ def refresh_verdict(src: Session, dst: Session | None, linked: bool) -> tuple[st
     parents = transcript_parents(src.transcript)
     if newer not in parents or older not in parents:
         return SKIP_UNPROVABLE, "last message not found in the transcript"
-    if is_ancestor(parents, older, newer):
+    behind = is_ancestor(parents, older, newer)
+    if behind:
         return REFRESH, f"turns {dst.data.get('completedTurns', '?')}->{src.data.get('completedTurns', '?')}"
-    if is_ancestor(parents, newer, older):
+    ahead = is_ancestor(parents, newer, older)
+    if ahead:
         return SKIP_DEST_AHEAD, "the copy here is further along"
+    if behind is None or ahead is None:
+        # a broken link is not evidence of divergence - say what is actually known
+        return SKIP_UNPROVABLE, "the transcript's history has a gap"
     return SKIP_DIVERGED, "both sides continued the conversation"
 
 

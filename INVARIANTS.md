@@ -51,8 +51,12 @@ alone:
   direction. A session this tool never copied is not its to replace;
 - both files name the same `cliSessionId`, and both carry `lastAssistantUuid`;
 - in the shared transcript, the copy's `lastAssistantUuid` is a strict ancestor
-  of the source's (following `logicalParentUuid` across compaction). A copy that
-  continued on its own, or is further along, is refused;
+  of the source's. Across a compaction boundary the walk follows
+  `logicalParentUuid` and the `compactMetadata.preservedSegment` uuids, because
+  Claude Code (seen in 2.1.317) can leave `logicalParentUuid` pointing at a
+  record written nowhere. A copy that continued on its own, or is further along,
+  is refused. A history with a gap the walk cannot cross is reported as "can't
+  compare", never as diverged, and is refused too;
 - the file is unchanged since the plan was made, checked again just before the
   swap.
 
@@ -65,7 +69,8 @@ the two.
 > `test_refresh_keeps_the_previous_version`, `test_diverged_copy_is_left_alone`,
 > `test_copy_ahead_of_source_is_left_alone`, `test_session_the_tool_never_copied_is_left_alone`,
 > `test_unmarked_copy_cannot_be_compared`, `test_replace_refuses_a_file_that_changed`,
-> `test_refresh_writes_are_exclusive_create`, `test_refresh_keeps_archive_state_of_the_copy`
+> `test_refresh_writes_are_exclusive_create`, `test_refresh_keeps_archive_state_of_the_copy`,
+> `test_compaction_with_dangling_logical_parent_follows_preserved_segment`, `test_gap_in_history_is_unprovable_not_diverged`
 
 ### S3 - A deleted session is never resurrected
 

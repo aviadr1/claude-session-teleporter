@@ -194,6 +194,39 @@ def test_compaction_boundary_is_followed(stale):
     assert json.loads(stale.dst.read_text(encoding="utf-8"))["lastAssistantUuid"] == "m3"
 
 
+def _boundary(uid: str, logical: str, segment: dict | None) -> dict:
+    """A compaction boundary as Claude Code 2.1.317 writes it."""
+    r = record(r"C:\repo")
+    r.update(uuid=uid, parentUuid=None, logicalParentUuid=logical,
+             type="system", subtype="compact_boundary",
+             compactMetadata={"trigger": "auto", **({"preservedSegment": segment} if segment else {})})
+    return r
+
+
+def test_compaction_with_dangling_logical_parent_follows_preserved_segment(stale):
+    # logicalParentUuid names a uuid written nowhere in the file; the boundary's
+    # preserved segment is what links the new chain back to m2 and m1
+    recs = chain(("m1", None), ("m2", "m1"))
+    recs.append(_boundary("c1", "nowhere", {"headUuid": "m1", "anchorUuid": "m2", "tailUuid": "m2"}))
+    recs += chain(("m3", "c1"))
+    stale.add_transcript(r"C:\repo", CLI, records=recs)
+    refresh(stale, "--apply")
+    assert json.loads(stale.dst.read_text(encoding="utf-8"))["lastAssistantUuid"] == "m3"
+
+
+def test_gap_in_history_is_unprovable_not_diverged(stale, capsys):
+    # same boundary with no segment: the link back is broken, so nothing is known
+    recs = chain(("m1", None), ("m2", "m1"))
+    recs.append(_boundary("c1", "nowhere", None))
+    recs += chain(("m3", "c1"))
+    stale.add_transcript(r"C:\repo", CLI, records=recs)
+    before = stale.dst.read_bytes()
+    refresh(stale, "--apply")
+    assert stale.dst.read_bytes() == before
+    out = capsys.readouterr().out
+    assert "can't compare" in out and "gap" in out and "diverged" not in out
+
+
 def test_copy_since_leaves_out_older_sessions(two_orgs, monkeypatch, capsys):
     w = two_orgs
     now = 1_700_000_000_000 + 10 * 3_600_000
